@@ -1,0 +1,18 @@
+# macOS
+.DS_Store
+
+# Swift / Xcode
+.build/
+.swiftpm/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+
+# Local Claude Code settings
+.claude/settings.local.json
+
+# Local disc samples (copyrighted, never commit)
+/samples/
+*.VOB
+*.IFO
+*.BUP
