@@ -2,7 +2,7 @@
 
 A native macOS app that extracts individual movies and TV episodes from DVD-Video discs into MKV files, without re-encoding.
 
-> Status: design phase. Nothing to run yet.
+> Status: early development. The app opens an empty window.
 
 ## What it does
 
@@ -33,9 +33,15 @@ Vocabulary is defined in [CONTEXT.md](CONTEXT.md); key decisions are tracked as 
 - **Unusual discs**: titles that play cells out of disc order are supported; multi-angle and seamless-branching titles are detected and marked unsupported.
 - **Playback**: output is MPEG-2 in MKV. Use VLC, IINA, Infuse, Plex or Jellyfin; QuickTime and Apple's TV app won't play it.
 
+## Development
+
+- `App/`: the Xcode project for the app. Open `App/Dividi.xcodeproj` and run.
+- `DividiKit/`: the engine, a Swift package. Run `swift test` inside it.
+- Formatting: `swift format`, default configuration. CI fails on any difference.
+
 ## Testing
 
-- Automated tests run on GitHub Actions.
+- Automated tests run on GitHub Actions: format lint, engine tests and an app build.
 - Real disc samples (copyrighted) may be used for local testing only and are never committed.
 
 ## Roadmap

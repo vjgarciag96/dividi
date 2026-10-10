@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Lint formatting
+        run: git ls-files -z '*.swift' | xargs -0 swift format lint --strict --parallel
+
+      - name: Test engine
+        working-directory: DividiKit
+        run: swift test
+
+      - name: Build app
+        run: >
+          xcodebuild build
+          -project App/Dividi.xcodeproj
+          -scheme Dividi
+          -destination 'generic/platform=macOS'
+          CODE_SIGNING_ALLOWED=NO
