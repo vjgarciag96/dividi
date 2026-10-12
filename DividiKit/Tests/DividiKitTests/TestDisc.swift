@@ -8,7 +8,11 @@ struct TestDisc {
   var titleSets: [TestTitleSet] = []
 
   var source: InMemorySource {
-    InMemorySource(files: ["VIDEO_TS.IFO": videoManagerIFO()])
+    var files = ["VIDEO_TS.IFO": videoManagerIFO()]
+    for (index, titleSet) in titleSets.enumerated() {
+      files[String(format: "VTS_%02d_0.IFO", index + 1)] = titleSet.ifo()
+    }
+    return InMemorySource(files: files)
   }
 
   private func videoManagerIFO() -> Data {
@@ -19,7 +23,7 @@ struct TestDisc {
     for title in titles {
       titleTable.u8(0)  // title type
       titleTable.u8(1)  // angle count
-      titleTable.u16(1)  // Chapter count
+      titleTable.u16(title.chapterCount)
       titleTable.u16(0)  // parental mask
       titleTable.u8(title.titleSet)
       titleTable.u8(title.titleInSet)
@@ -38,9 +42,116 @@ struct TestDisc {
 struct TestTitle {
   var titleSet = 1
   var titleInSet = 1
+  var chapterCount = 1
 }
 
-struct TestTitleSet {}
+struct TestTitleSet {
+  /// For each Title in the set, its Chapters as (program chain, program) pairs, 1-based.
+  var chapters: [[(programChain: Int, program: Int)]] = []
+  var programChains: [TestProgramChain] = []
+
+  fileprivate func ifo() -> Data {
+    var chapterTable = ByteWriter()
+    chapterTable.u16(chapters.count)
+    chapterTable.u16(0)
+    let listsStart = 8 + 4 * chapters.count
+    let end = listsStart + 4 * chapters.joined().count - 1
+    chapterTable.u32(end)
+    var offset = listsStart
+    for list in chapters {
+      chapterTable.u32(offset)
+      offset += 4 * list.count
+    }
+    for (programChain, program) in chapters.joined() {
+      chapterTable.u16(programChain)
+      chapterTable.u16(program)
+    }
+
+    var programChainTable = ByteWriter()
+    programChainTable.u16(programChains.count)
+    programChainTable.u16(0)
+    let encoded = programChains.map { $0.bytes() }
+    programChainTable.u32(8 + 8 * programChains.count + encoded.map(\.count).reduce(0, +) - 1)
+    var programChainOffset = 8 + 8 * programChains.count
+    for (chain, bytes) in zip(programChains, encoded) {
+      programChainTable.u8(0x80 | chain.titleInSet)
+      programChainTable.u8(0)
+      programChainTable.u16(0)
+      programChainTable.u32(programChainOffset)
+      programChainOffset += bytes.count
+    }
+    for bytes in encoded { programChainTable.bytes(bytes) }
+
+    var header = ByteWriter()
+    header.ascii("DVDVIDEO-VTS")
+    let chapterTableSectors = chapterTable.sectorCount
+    header.u32(1, at: 0xC8)
+    header.u32(1 + chapterTableSectors, at: 0xCC)
+    return layOutIFO(header: header, tables: [chapterTable, programChainTable])
+  }
+}
+
+/// A program chain: Cells in playback order and the programs (Chapter entry points)
+/// that start at them.
+struct TestProgramChain {
+  var titleInSet = 1
+  var playbackTime = TestTime(seconds: 0)
+  var cells: [TestCell] = []
+  /// Entry Cell of each program, 1-based.
+  var programs = [1]
+
+  fileprivate func bytes() -> Data {
+    let headerSize = 0xEC
+    let programMapSize = (programs.count + 1) & ~1
+    let cellPlaybackOffset = headerSize + programMapSize
+    let cellPositionOffset = cellPlaybackOffset + 24 * cells.count
+
+    var chain = ByteWriter()
+    chain.u8(programs.count, at: 2)
+    chain.u8(cells.count, at: 3)
+    chain.bytes(playbackTime.bcd, at: 4)
+    chain.u16(headerSize, at: 0xE6)
+    chain.u16(cellPlaybackOffset, at: 0xE8)
+    chain.u16(cellPositionOffset, at: 0xEA)
+    for (index, entryCell) in programs.enumerated() {
+      chain.u8(entryCell, at: headerSize + index)
+    }
+    for (index, cell) in cells.enumerated() {
+      let offset = cellPlaybackOffset + 24 * index
+      chain.bytes(cell.playbackTime.bcd, at: offset + 4)
+      chain.u32(cell.firstSector, at: offset + 8)
+      chain.u32(cell.lastSector - 1, at: offset + 16)
+      chain.u32(cell.lastSector, at: offset + 20)
+    }
+    for (index, _) in cells.enumerated() {
+      chain.u16(1, at: cellPositionOffset + 4 * index)
+      chain.u8(index + 1, at: cellPositionOffset + 4 * index + 3)
+    }
+    chain.pad(to: cellPositionOffset + 4 * cells.count)
+    return chain.data
+  }
+}
+
+struct TestCell {
+  var playbackTime = TestTime(seconds: 0)
+  var firstSector = 0
+  var lastSector = 0
+}
+
+/// A playback time as IFOs store it: BCD hours, minutes, seconds and frames.
+struct TestTime {
+  var hours = 0
+  var minutes = 0
+  var seconds = 0
+  var frames = 0
+  var framesPerSecond = 25
+
+  var bcd: Data {
+    func bcd(_ value: Int) -> UInt8 { UInt8((value / 10) << 4 | value % 10) }
+    let rate: UInt8 = framesPerSecond == 25 ? 0b01 : 0b11
+    return Data([bcd(hours), bcd(minutes), bcd(seconds), rate << 6 | bcd(frames)])
+  }
+}
 
 /// Lays out an IFO: the header in sector 0, then each table starting on its own sector.
 private func layOutIFO(header: ByteWriter, tables: [ByteWriter]) -> Data {
