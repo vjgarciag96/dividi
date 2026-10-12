@@ -5,11 +5,12 @@ public struct Disc: Sendable {
   /// The Titles reachable from the Disc's title table, in title-table order.
   public let titles: [Title]
 
-  /// Reads and parses the Disc's title table.
+  /// Reads and parses every IFO the title table needs. Any IFO that fails fails the whole Disc.
   public init(reading source: some SectorSource) throws(DiscError) {
     let managerFile = "VIDEO_TS.IFO"
     let manager = try parse(managerFile, from: source, as: VideoManagerIFO.init)
 
+    var titleSets: [Int: TitleSetIFO] = [:]
     var titles: [Title] = []
     for (index, entry) in manager.titles.enumerated() {
       guard entry.titleSet >= 1, entry.titleSet <= manager.titleSetCount else {
@@ -17,7 +18,19 @@ public struct Disc: Sendable {
           file: managerFile,
           reason: .invalidReference("Title \(index + 1) is in missing Title Set \(entry.titleSet)"))
       }
-      titles.append(Title(number: index + 1, titleSet: entry.titleSet))
+      let titleSetFile = String(format: "VTS_%02d_0.IFO", entry.titleSet)
+      let titleSet: TitleSetIFO
+      if let parsed = titleSets[entry.titleSet] {
+        titleSet = parsed
+      } else {
+        titleSet = try parse(titleSetFile, from: source, as: TitleSetIFO.init)
+        titleSets[entry.titleSet] = titleSet
+      }
+      do {
+        titles.append(try Title(number: index + 1, entry: entry, in: titleSet))
+      } catch {
+        throw DiscError(file: titleSetFile, reason: error)
+      }
     }
     self.titles = titles
   }
@@ -51,6 +64,49 @@ extension DiscError: LocalizedError {
       case .invalidReference(let description): description
       }
     return "\(file): \(reason)"
+  }
+}
+
+extension Title {
+  /// Resolves a title-table entry through its Title Set's Chapters, program chains and Cells.
+  fileprivate init(number: Int, entry: VideoManagerIFO.TitleEntry, in titleSet: TitleSetIFO)
+    throws(DiscError.Reason)
+  {
+    guard titleSet.chapters.indices.contains(entry.titleInSet - 1) else {
+      throw .invalidReference("Title \(number) is missing from its Title Set")
+    }
+    let chapterEntries = titleSet.chapters[entry.titleInSet - 1]
+    guard let chainNumber = chapterEntries.first?.programChain,
+      titleSet.programChains.indices.contains(chainNumber - 1)
+    else { throw .invalidReference("Title \(number) has no program chain") }
+    guard chapterEntries.allSatisfy({ $0.programChain == chainNumber }) else {
+      throw .invalidReference("Title \(number) spans several program chains")
+    }
+    let chain = titleSet.programChains[chainNumber - 1]
+
+    // Offset of each Cell from the start of the Title.
+    var cellStarts: [Duration] = []
+    var elapsed = Duration.zero
+    for cell in chain.cells {
+      cellStarts.append(elapsed)
+      elapsed += cell.playbackTime
+    }
+
+    var chapterStarts: [Duration] = []
+    for chapter in chapterEntries {
+      guard chain.programs.indices.contains(chapter.program - 1),
+        cellStarts.indices.contains(chain.programs[chapter.program - 1] - 1)
+      else { throw .invalidReference("Title \(number) has a Chapter with no Cell") }
+      chapterStarts.append(cellStarts[chain.programs[chapter.program - 1] - 1])
+    }
+
+    self.number = number
+    self.titleSet = entry.titleSet
+    duration = chain.playbackTime
+    chapters = zip(chapterStarts, chapterStarts.dropFirst() + [chain.playbackTime]).map {
+      Chapter(start: $0, duration: $1 - $0)
+    }
+    cells = chain.cells.map { Cell(sectors: $0.sectors, duration: $0.playbackTime) }
   }
 }
 

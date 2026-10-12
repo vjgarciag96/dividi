@@ -26,4 +26,19 @@ struct ByteReader {
     return Array(bytes[offset..<offset + count])
   }
 
+  /// A BCD playback time: hours, minutes, seconds, then frames with the frame rate in the top bits.
+  func playbackTime(at offset: Int) throws(DiscError.Reason) -> Duration {
+    func bcd(_ byte: Int) -> Int { (byte >> 4) * 10 + (byte & 0x0F) }
+    let hours = try bcd(u8(at: offset))
+    let minutes = try bcd(u8(at: offset + 1))
+    let seconds = try bcd(u8(at: offset + 2))
+    let frameByte = try u8(at: offset + 3)
+    let frames = bcd(frameByte & 0x3F)
+    let time = Duration.seconds(hours * 3600 + minutes * 60 + seconds)
+    switch frameByte >> 6 {
+    case 0b01: return time + .milliseconds(frames * 40)
+    case 0b11: return time + .nanoseconds(frames * 100_100_000 / 3)
+    default: return time
+    }
+  }
 }
