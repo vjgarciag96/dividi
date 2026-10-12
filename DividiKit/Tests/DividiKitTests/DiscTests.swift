@@ -70,6 +70,43 @@ import Testing
     ])
 }
 
+@Test func titleSpanningProgramChainsPlaysThemInChapterOrder() throws {
+  let disc = TestDisc(
+    titles: [TestTitle(chapterCount: 3)],
+    titleSets: [
+      TestTitleSet(
+        chapters: [
+          [
+            (programChain: 2, program: 1), (programChain: 2, program: 2),
+            (programChain: 1, program: 1),
+          ]
+        ],
+        programChains: [
+          TestProgramChain(
+            playbackTime: TestTime(minutes: 5),
+            cells: [TestCell(playbackTime: TestTime(minutes: 5), firstSector: 0, lastSector: 99)]),
+          TestProgramChain(
+            playbackTime: TestTime(minutes: 10),
+            cells: [
+              TestCell(playbackTime: TestTime(minutes: 4), firstSector: 100, lastSector: 199),
+              TestCell(playbackTime: TestTime(minutes: 6), firstSector: 200, lastSector: 299),
+            ],
+            programs: [1, 2]),
+        ])
+    ])
+
+  let title = try #require(try Disc(reading: disc.source).titles.first)
+
+  #expect(title.duration == .seconds(15 * 60))
+  #expect(title.cells.map(\.sectors) == [100...199, 200...299, 0...99])
+  #expect(
+    title.chapters == [
+      Chapter(start: .zero, duration: .seconds(240)),
+      Chapter(start: .seconds(240), duration: .seconds(360)),
+      Chapter(start: .seconds(600), duration: .seconds(300)),
+    ])
+}
+
 @Test func titlesFollowTheTitleTableAcrossTitleSets() throws {
   func titleSet(durations: [Int]) -> TestTitleSet {
     TestTitleSet(
