@@ -8,6 +8,7 @@ import Testing
     titles: [TestTitle(titleSet: 1, titleInSet: 1, chapterCount: 1)],
     titleSets: [
       TestTitleSet(
+        audio: [TestAudio(codingMode: 0, channels: 6, language: "en", codeExtension: 1)],
         chapters: [[(programChain: 1, program: 1)]],
         programChains: [
           TestProgramChain(
@@ -17,7 +18,8 @@ import Testing
                 playbackTime: TestTime(minutes: 1, seconds: 30, frames: 12),
                 firstSector: 0, lastSector: 999)
             ],
-            programs: [1])
+            programs: [1],
+            audioStreams: [0])
         ])
     ])
 
@@ -30,7 +32,9 @@ import Testing
         titleSet: 1,
         duration: .milliseconds(90_480),
         chapters: [Chapter(start: .zero, duration: .milliseconds(90_480))],
-        cells: [Cell(sectors: 0...999, duration: .milliseconds(90_480))])
+        cells: [Cell(sectors: 0...999, duration: .milliseconds(90_480))],
+        audioTracks: [AudioTrack(codec: .ac3, channels: 6, language: "en", kind: .normal)],
+        subtitleTracks: [])
     ])
 }
 
@@ -70,6 +74,46 @@ import Testing
     ])
 }
 
+@Test func titleListsOnlyTheTracksItUses() throws {
+  let disc = TestDisc(
+    titles: [TestTitle()],
+    titleSets: [
+      TestTitleSet(
+        audio: [
+          TestAudio(codingMode: 0, channels: 6, language: "en", codeExtension: 1),
+          TestAudio(codingMode: 6, channels: 6, language: "de", codeExtension: 1),
+          TestAudio(codingMode: 0, channels: 2, language: "en", codeExtension: 3),
+          TestAudio(codingMode: 4, channels: 2, language: nil, codeExtension: 0),
+        ],
+        subtitles: [
+          TestSubtitle(language: "en", codeExtension: 1),
+          TestSubtitle(language: "fr", codeExtension: 1),
+          TestSubtitle(language: "en", codeExtension: 9),
+        ],
+        chapters: [[(programChain: 1, program: 1)]],
+        programChains: [
+          TestProgramChain(
+            cells: [TestCell()],
+            audioStreams: [0, 2, 3],
+            subtitleStreams: [0, 2])
+        ])
+    ])
+
+  let title = try #require(try Disc(reading: disc.source).titles.first)
+
+  #expect(
+    title.audioTracks == [
+      AudioTrack(codec: .ac3, channels: 6, language: "en", kind: .normal),
+      AudioTrack(codec: .ac3, channels: 2, language: "en", kind: .directorsComments),
+      AudioTrack(codec: .lpcm, channels: 2, language: nil, kind: .unspecified),
+    ])
+  #expect(
+    title.subtitleTracks == [
+      SubtitleTrack(language: "en", kind: .normal),
+      SubtitleTrack(language: "en", kind: .forced),
+    ])
+}
+
 @Test func titleSpanningProgramChainsPlaysThemInChapterOrder() throws {
   let disc = TestDisc(
     titles: [TestTitle(chapterCount: 3)],
@@ -105,6 +149,26 @@ import Testing
       Chapter(start: .seconds(240), duration: .seconds(360)),
       Chapter(start: .seconds(600), duration: .seconds(300)),
     ])
+}
+
+@Test func titleSpanningProgramChainsListsTracksUsedByAnyOfThem() throws {
+  let disc = TestDisc(
+    titles: [TestTitle(chapterCount: 2)],
+    titleSets: [
+      TestTitleSet(
+        audio: [TestAudio(language: "en"), TestAudio(language: "fr")],
+        subtitles: [TestSubtitle(language: "en"), TestSubtitle(language: "fr")],
+        chapters: [[(programChain: 1, program: 1), (programChain: 2, program: 1)]],
+        programChains: [
+          TestProgramChain(cells: [TestCell()], audioStreams: [0], subtitleStreams: []),
+          TestProgramChain(cells: [TestCell()], audioStreams: [1], subtitleStreams: [1]),
+        ])
+    ])
+
+  let title = try #require(try Disc(reading: disc.source).titles.first)
+
+  #expect(title.audioTracks.map(\.language) == ["en", "fr"])
+  #expect(title.subtitleTracks.map(\.language) == ["fr"])
 }
 
 @Test func titlesFollowTheTitleTableAcrossTitleSets() throws {
