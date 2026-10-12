@@ -126,6 +126,14 @@ extension Title {
     subtitleTracks = titleSet.subtitleTracks.indices
       .filter { stream in chains.contains { $0.usesSubtitles[stream] } }
       .map { titleSet.subtitleTracks[$0] }
+    unsupportedReason =
+      if entry.angles > 1 || cells.contains(where: \.isAngle) {
+        .multiAngle
+      } else if cells.contains(where: \.isInterleaved) {
+        .seamlessBranching
+      } else {
+        nil
+      }
   }
 }
 

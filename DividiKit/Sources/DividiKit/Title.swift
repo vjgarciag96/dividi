@@ -13,6 +13,8 @@ public struct Title: Equatable, Sendable {
   public let audioTracks: [AudioTrack]
   /// The subtitle Tracks the Title uses.
   public let subtitleTracks: [SubtitleTrack]
+  /// Why dividi declines to extract the Title, or `nil` if it's supported.
+  public let unsupportedReason: UnsupportedReason?
 }
 
 /// A user-visible entry point within a Title.
@@ -58,4 +60,10 @@ public struct SubtitleTrack: Equatable, Sendable {
   /// A raw 2-letter language code, e.g. `en`.
   public let language: String?
   public let kind: Kind
+}
+
+/// Why a Title is an Unsupported Title.
+public enum UnsupportedReason: Equatable, Sendable {
+  case multiAngle
+  case seamlessBranching
 }

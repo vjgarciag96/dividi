@@ -12,6 +12,7 @@ enum IFOHeader {
 /// `VIDEO_TS.IFO`: the Disc's title table.
 struct VideoManagerIFO {
   struct TitleEntry {
+    let angles: Int
     let titleSet: Int
     let titleInSet: Int
   }
@@ -27,6 +28,8 @@ struct VideoManagerIFO {
   private enum TitleTable {
     static let firstEntry = 8
     static let entrySize = 12
+    /// Within an entry: the number of camera angles (u8).
+    static let angles = 1
     /// Within an entry: the Title Set holding the Title (u8).
     static let titleSet = 6
     /// Within an entry: the Title's number within its Title Set (u8).
@@ -48,6 +51,7 @@ struct VideoManagerIFO {
       let entry = table + TitleTable.firstEntry + TitleTable.entrySize * index
       titles.append(
         TitleEntry(
+          angles: try ifo.u8(at: entry + TitleTable.angles),
           titleSet: try ifo.u8(at: entry + TitleTable.titleSet),
           titleInSet: try ifo.u8(at: entry + TitleTable.titleInSet)))
     }
@@ -164,6 +168,10 @@ struct ProgramChain {
   struct CellPlayback {
     let sectors: ClosedRange<Int>
     let playbackTime: Duration
+    /// Part of a block of Cells that are alternative camera angles.
+    let isAngle: Bool
+    /// Interleaved with other Cells on the Disc, as angles and seamless branches are.
+    let isInterleaved: Bool
   }
 
   /// Fields relative to the start of the program chain.
@@ -187,6 +195,9 @@ struct ProgramChain {
   /// The Cell playback table: one 24-byte entry per Cell, in playback order.
   private enum CellEntry {
     static let size = 24
+    /// Block mode and type in the top 4 bits (`01` type: angle block), then flags
+    /// including interleaved (bit 2) (u8).
+    static let flags = 0
     /// The Cell's playback time (BCD, 4 bytes).
     static let playbackTime = 4
     /// The Cell's first Sector (u32).
@@ -222,11 +233,14 @@ struct ProgramChain {
     let cellTable = start + (try ifo.u16(at: start + Field.cellTableOffset))
     cells = try (0..<cellCount).map { (index) throws(DiscError.Reason) in
       let cell = cellTable + CellEntry.size * index
+      let flags = try ifo.u8(at: cell + CellEntry.flags)
       let firstSector = try ifo.u32(at: cell + CellEntry.firstSector)
       let lastSector = try ifo.u32(at: cell + CellEntry.lastSector)
       return CellPlayback(
         sectors: firstSector...lastSector,
-        playbackTime: try ifo.playbackTime(at: cell + CellEntry.playbackTime))
+        playbackTime: try ifo.playbackTime(at: cell + CellEntry.playbackTime),
+        isAngle: flags >> 4 & 0b11 == 0b01,
+        isInterleaved: flags & 0x04 != 0)
     }
   }
 }
