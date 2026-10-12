@@ -22,7 +22,7 @@ struct TestDisc {
     titleTable.u32(8 + 12 * titles.count - 1)  // last byte of the table
     for title in titles {
       titleTable.u8(0)  // title type
-      titleTable.u8(1)  // angle count
+      titleTable.u8(title.angles)
       titleTable.u16(title.chapterCount)
       titleTable.u16(0)  // parental mask
       titleTable.u8(title.titleSet)
@@ -43,6 +43,7 @@ struct TestTitle {
   var titleSet = 1
   var titleInSet = 1
   var chapterCount = 1
+  var angles = 1
 }
 
 struct TestTitleSet {
@@ -162,6 +163,9 @@ struct TestProgramChain {
     }
     for (index, cell) in cells.enumerated() {
       let offset = cellPlaybackOffset + 24 * index
+      let flags =
+        cell.angleBlock.rawValue << 4 | (cell.seamless ? 0x08 : 0) | (cell.interleaved ? 0x04 : 0)
+      chain.u8(flags, at: offset)  // block mode and type | seamless | interleaved
       chain.bytes(cell.playbackTime.bcd, at: offset + 4)  // playback time
       chain.u32(cell.firstSector, at: offset + 8)  // first Sector
       chain.u32(cell.lastSector - 1, at: offset + 16)  // last VOBU's first Sector
@@ -177,9 +181,18 @@ struct TestProgramChain {
 }
 
 struct TestCell {
+  enum AngleBlock: Int {
+    case none = 0
+    case firstAngle = 0b0101
+    case lastAngle = 0b1101
+  }
+
   var playbackTime = TestTime(seconds: 0)
   var firstSector = 0
   var lastSector = 0
+  var angleBlock = AngleBlock.none
+  var seamless = false
+  var interleaved = false
 }
 
 /// A playback time as IFOs store it: BCD hours, minutes, seconds and frames.
