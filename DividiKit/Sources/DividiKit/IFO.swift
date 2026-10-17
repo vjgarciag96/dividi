@@ -232,10 +232,9 @@ struct ProgramChain {
 }
 
 extension AudioTrack {
-  /// Fields within an 8-byte audio attributes entry.
+  /// Fields within an 8-byte audio attributes entry, which starts with the coding mode in its
+  /// top 3 bits (u8).
   private enum Field {
-    /// The coding mode, in the top 3 bits (u8).
-    static let codingMode = 0
     /// The channel count minus 1, in the bottom 3 bits (u8).
     static let channels = 1
     /// The 2-letter language code (2 ASCII bytes).
@@ -245,8 +244,9 @@ extension AudioTrack {
   }
 
   init(_ ifo: ByteReader, at offset: Int) throws(DiscError.Reason) {
+    // An entry starts with the coding mode, in the top 3 bits (u8).
     codec =
-      switch try ifo.u8(at: offset + Field.codingMode) >> 5 {
+      switch try ifo.u8(at: offset) >> 5 {
       case 0: .ac3
       case 2: .mpeg1
       case 3: .mpeg2
