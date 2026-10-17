@@ -46,6 +46,8 @@ struct TestTitle {
 }
 
 struct TestTitleSet {
+  var audio: [TestAudio] = []
+  var subtitles: [TestSubtitle] = []
   /// For each Title in the set, its Chapters as (program chain, program) pairs, 1-based.
   var chapters: [[(programChain: Int, program: Int)]] = []
   var programChains: [TestProgramChain] = []
@@ -85,6 +87,23 @@ struct TestTitleSet {
 
     var header = ByteWriter()
     header.ascii("DVDVIDEO-VTS")
+    header.u16(audio.count, at: 0x202)  // audio stream count
+    for (index, track) in audio.enumerated() {
+      let offset = 0x204 + 8 * index  // audio attributes
+      // Coding mode | language present.
+      header.u8(track.codingMode << 5 | (track.language == nil ? 0 : 1) << 2, at: offset)
+      header.u8(track.channels - 1, at: offset + 1)  // channel count - 1
+      header.ascii(track.language ?? "\0\0", at: offset + 2)  // language code
+      header.u8(track.codeExtension, at: offset + 5)  // kind
+    }
+    header.u16(subtitles.count, at: 0x254)  // subtitle stream count
+    for (index, track) in subtitles.enumerated() {
+      let offset = 0x256 + 6 * index  // subtitle attributes
+      header.u8(track.language == nil ? 0 : 1, at: offset)  // language present
+      header.ascii(track.language ?? "\0\0", at: offset + 2)  // language code
+      header.u8(track.codeExtension, at: offset + 5)  // kind
+    }
+
     let chapterTableSectors = chapterTable.sectorCount
     header.u32(1, at: 0xC8)  // Chapter table Sector
     header.u32(1 + chapterTableSectors, at: 0xCC)  // program chain table Sector
@@ -92,14 +111,32 @@ struct TestTitleSet {
   }
 }
 
-/// A program chain: Cells in playback order and the programs (Chapter entry points)
-/// that start at them.
+struct TestAudio {
+  /// 0 AC-3, 2 MPEG-1, 3 MPEG-2, 4 LPCM, 6 DTS.
+  var codingMode = 0
+  var channels = 2
+  var language: String? = "en"
+  /// 1 normal, 2 visually impaired, 3 director's comments, 4 alternate director's comments.
+  var codeExtension = 1
+}
+
+struct TestSubtitle {
+  var language: String? = "en"
+  /// 1 normal, 2 large, 3 children, 5–7 captions, 9 forced, 13–15 director's comments.
+  var codeExtension = 1
+}
+
+/// A program chain: Cells in playback order, the programs (Chapter entry points)
+/// that start at them, and the streams it uses.
 struct TestProgramChain {
   var titleInSet = 1
   var playbackTime = TestTime(seconds: 0)
   var cells: [TestCell] = []
   /// Entry Cell of each program, 1-based.
   var programs = [1]
+  /// Audio stream numbers the chain uses, as indices into the Title Set's audio.
+  var audioStreams: [Int] = []
+  var subtitleStreams: [Int] = []
 
   fileprivate func bytes() -> Data {
     let headerSize = 0xEC
@@ -111,6 +148,12 @@ struct TestProgramChain {
     chain.u8(programs.count, at: 2)  // program count
     chain.u8(cells.count, at: 3)  // Cell count
     chain.bytes(playbackTime.bcd, at: 4)  // playback time
+    for stream in audioStreams {
+      chain.u8(0x80 | stream, at: 0x0C + 2 * stream)  // audio stream control: used | stream
+    }
+    for stream in subtitleStreams {
+      chain.u8(0x80 | stream, at: 0x1C + 4 * stream)  // subtitle stream control: used | stream
+    }
     chain.u16(headerSize, at: 0xE6)  // program map offset
     chain.u16(cellPlaybackOffset, at: 0xE8)  // Cell playback table offset
     chain.u16(cellPositionOffset, at: 0xEA)  // Cell position table offset
