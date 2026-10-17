@@ -192,12 +192,11 @@ struct ProgramChain {
     static let cellTableOffset = 0xE8
   }
 
-  /// The Cell playback table: one 24-byte entry per Cell, in playback order.
+  /// The Cell playback table: one 24-byte entry per Cell, in playback order. An entry starts
+  /// with a flags byte: block mode and type in the top 4 bits (`01` type: angle block), then
+  /// flags including interleaved (bit 2).
   private enum CellEntry {
     static let size = 24
-    /// Block mode and type in the top 4 bits (`01` type: angle block), then flags
-    /// including interleaved (bit 2) (u8).
-    static let flags = 0
     /// The Cell's playback time (BCD, 4 bytes).
     static let playbackTime = 4
     /// The Cell's first Sector (u32).
@@ -233,7 +232,8 @@ struct ProgramChain {
     let cellTable = start + (try ifo.u16(at: start + Field.cellTableOffset))
     cells = try (0..<cellCount).map { (index) throws(DiscError.Reason) in
       let cell = cellTable + CellEntry.size * index
-      let flags = try ifo.u8(at: cell + CellEntry.flags)
+      // An entry starts with its flags: block mode and type, then interleaved and others (u8).
+      let flags = try ifo.u8(at: cell)
       let firstSector = try ifo.u32(at: cell + CellEntry.firstSector)
       let lastSector = try ifo.u32(at: cell + CellEntry.lastSector)
       return CellPlayback(
