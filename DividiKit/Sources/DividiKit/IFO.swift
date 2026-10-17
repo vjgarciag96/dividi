@@ -23,10 +23,8 @@ struct VideoManagerIFO {
     static let titleTableSector = 0xC4
   }
 
-  /// The title table (`TT_SRPT`): a count, then one 12-byte entry per Title.
+  /// The title table (`TT_SRPT`): the number of Titles (u16), then one 12-byte entry per Title.
   private enum TitleTable {
-    /// The number of Titles (u16).
-    static let titleCount = 0
     static let firstEntry = 8
     static let entrySize = 12
     /// Within an entry: the Title Set holding the Title (u8).
@@ -45,7 +43,8 @@ struct VideoManagerIFO {
 
     let table = try ifo.u32(at: Header.titleTableSector) * Sector.size
     var titles: [TitleEntry] = []
-    for index in 0..<(try ifo.u16(at: table + TitleTable.titleCount)) {
+    // The table starts with its Title count (u16).
+    for index in 0..<(try ifo.u16(at: table)) {
       let entry = table + TitleTable.firstEntry + TitleTable.entrySize * index
       titles.append(
         TitleEntry(
