@@ -70,26 +70,22 @@ struct TitleSetIFO {
     static let programChainTableSector = 0xCC
   }
 
-  /// The Chapter table (`VTS_PTT_SRPT`): for each Title, the offset of its list of
-  /// 4-byte Chapter entries. Each list runs until the next one, the last until the table's end.
+  /// The Chapter table (`VTS_PTT_SRPT`): the number of Titles (u16), then each Title's offset
+  /// to its list of 4-byte Chapter entries. Each list runs until the next one, the last until
+  /// the table's end. An entry is a program chain (u16) and a program within it (u16).
   private enum ChapterTable {
-    /// The number of Titles (u16).
-    static let titleCount = 0
     /// The table's last byte, relative to its start (u32).
     static let lastByte = 4
     /// Each Title's list offset, relative to the table's start (u32 each).
     static let listOffsets = 8
     static let entrySize = 4
-    /// Within an entry: the program chain (u16).
-    static let programChain = 0
-    /// Within an entry: the program within that chain (u16).
+    /// Within an entry: the program, after the program chain (u16).
     static let program = 2
   }
 
-  /// The program chain table (`VTS_PGCI`): a count, then one 8-byte entry per program chain.
+  /// The program chain table (`VTS_PGCI`): the number of program chains (u16), then one
+  /// 8-byte entry per program chain.
   private enum ProgramChainTable {
-    /// The number of program chains (u16).
-    static let chainCount = 0
     static let firstEntry = 8
     static let entrySize = 8
     /// Within an entry: the chain's offset, relative to the table's start (u32).
@@ -105,7 +101,8 @@ struct TitleSetIFO {
     guard try ifo.bytes(at: 0, count: 12) == Array("DVDVIDEO-VTS".utf8) else { throw .notAnIFO }
 
     let chapterTable = try ifo.u32(at: Header.chapterTableSector) * Sector.size
-    let titleCount = try ifo.u16(at: chapterTable + ChapterTable.titleCount)
+    // The table starts with its Title count (u16).
+    let titleCount = try ifo.u16(at: chapterTable)
     let chapterTableEnd = chapterTable + (try ifo.u32(at: chapterTable + ChapterTable.lastByte)) + 1
     var listStarts: [Int] = []
     for index in 0..<titleCount {
@@ -118,7 +115,8 @@ struct TitleSetIFO {
       for entry in stride(from: start, to: end, by: ChapterTable.entrySize) {
         list.append(
           ChapterEntry(
-            programChain: try ifo.u16(at: entry + ChapterTable.programChain),
+            // An entry starts with its program chain (u16).
+            programChain: try ifo.u16(at: entry),
             program: try ifo.u16(at: entry + ChapterTable.program)))
       }
       chapters.append(list)
@@ -127,7 +125,8 @@ struct TitleSetIFO {
 
     let chainTable = try ifo.u32(at: Header.programChainTableSector) * Sector.size
     var programChains: [ProgramChain] = []
-    for index in 0..<(try ifo.u16(at: chainTable + ProgramChainTable.chainCount)) {
+    // The table starts with its program chain count (u16).
+    for index in 0..<(try ifo.u16(at: chainTable)) {
       let entry = chainTable + ProgramChainTable.firstEntry + ProgramChainTable.entrySize * index
       let chain = chainTable + (try ifo.u32(at: entry + ProgramChainTable.chainOffset))
       programChains.append(try ProgramChain(ifo, at: chain))
