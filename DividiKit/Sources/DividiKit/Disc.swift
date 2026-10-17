@@ -62,7 +62,7 @@ private func parse<IFO>(
   let data: Data
   do {
     let header = try source.readSectors(0...0, of: file)
-    let lastSector = try ByteReader(header).u32(at: 0x1C)
+    let lastSector = try ByteReader(header).u32(at: IFOHeader.lastSector)
     data = try source.readSectors(0...lastSector, of: file)
   } catch let reason as DiscError.Reason {
     throw DiscError(file: file, reason: reason)

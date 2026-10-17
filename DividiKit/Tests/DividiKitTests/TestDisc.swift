@@ -14,22 +14,22 @@ struct TestDisc {
   private func videoManagerIFO() -> Data {
     var titleTable = ByteWriter()
     titleTable.u16(titles.count)
-    titleTable.u16(0)
-    titleTable.u32(8 + 12 * titles.count - 1)
+    titleTable.u16(0)  // reserved
+    titleTable.u32(8 + 12 * titles.count - 1)  // last byte of the table
     for title in titles {
-      titleTable.u8(0)
-      titleTable.u8(1)
-      titleTable.u16(1)
-      titleTable.u16(0)
+      titleTable.u8(0)  // title type
+      titleTable.u8(1)  // angle count
+      titleTable.u16(1)  // Chapter count
+      titleTable.u16(0)  // parental mask
       titleTable.u8(title.titleSet)
       titleTable.u8(title.titleInSet)
-      titleTable.u32(0)
+      titleTable.u32(0)  // Title Set's first Sector
     }
 
     var header = ByteWriter()
     header.ascii("DVDVIDEO-VMG")
-    header.u16(titleSets.count, at: 0x3E)
-    header.u32(1, at: 0xC4)
+    header.u16(titleSets.count, at: 0x3E)  // Title Set count
+    header.u32(1, at: 0xC4)  // title table Sector
     return layOutIFO(header: header, tables: [titleTable])
   }
 }
@@ -46,7 +46,7 @@ struct TestTitleSet {}
 private func layOutIFO(header: ByteWriter, tables: [ByteWriter]) -> Data {
   var header = header
   let lastSector = tables.map(\.sectorCount).reduce(0, +)
-  header.u32(lastSector, at: 0x1C)
+  header.u32(lastSector, at: 0x1C)  // the IFO's last Sector
   header.pad(to: Sector.size)
   var data = header.data
   for table in tables {
