@@ -1,5 +1,5 @@
 /// A playable programme reachable from the Disc's title table, made of an ordered list of Cells.
-public struct Title: Equatable, Sendable {
+public struct Title: Equatable, Identifiable, Sendable {
   /// The Title's 1-based position in the Disc's title table.
   public let number: Int
   /// The 1-based Title Set holding the Title's Cells.
@@ -15,6 +15,8 @@ public struct Title: Equatable, Sendable {
   public let subtitleTracks: [SubtitleTrack]
   /// Why dividi declines to extract the Title, or `nil` if it's supported.
   public let unsupportedReason: UnsupportedReason?
+
+  public var id: Int { number }
 }
 
 /// A user-visible entry point within a Title.

@@ -23,7 +23,7 @@ A group of Titles on a Disc that share the same video, audio and subtitle attrib
 _Avoid_: VTS (outside of format-level code)
 
 **Title**:
-A playable programme on a Disc (an episode, a movie, an extra, a "Play All" sequence), made of an ordered list of Cells.
+A playable programme reachable from the Disc's title table (an episode, a movie, an extra, a "Play All" sequence), made of an ordered list of Cells.
 _Avoid_: Track, video, stream
 
 **Chapter**:
