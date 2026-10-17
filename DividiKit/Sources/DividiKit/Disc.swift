@@ -76,37 +76,50 @@ extension Title {
       throw .invalidReference("Title \(number) is missing from its Title Set")
     }
     let chapterEntries = titleSet.chapters[entry.titleInSet - 1]
-    guard let chainNumber = chapterEntries.first?.programChain,
-      titleSet.programChains.indices.contains(chainNumber - 1)
-    else { throw .invalidReference("Title \(number) has no program chain") }
-    guard chapterEntries.allSatisfy({ $0.programChain == chainNumber }) else {
-      throw .invalidReference("Title \(number) spans several program chains")
-    }
-    let chain = titleSet.programChains[chainNumber - 1]
 
-    // Offset of each Cell from the start of the Title.
-    var cellStarts: [Duration] = []
+    // The Title plays its program chains in the order its Chapters first reach them.
+    var chainNumbers: [Int] = []
+    for chapter in chapterEntries where !chainNumbers.contains(chapter.programChain) {
+      guard titleSet.programChains.indices.contains(chapter.programChain - 1) else {
+        throw .invalidReference("Title \(number) has a Chapter in a missing program chain")
+      }
+      chainNumbers.append(chapter.programChain)
+    }
+    let chains = chainNumbers.map { titleSet.programChains[$0 - 1] }
+    guard !chains.isEmpty else {
+      throw .invalidReference("Title \(number) has no Chapters")
+    }
+
+    // Offset of each Cell from the start of the Title, by program chain.
+    var cellStarts: [Int: [Duration]] = [:]
     var elapsed = Duration.zero
-    for cell in chain.cells {
-      cellStarts.append(elapsed)
-      elapsed += cell.playbackTime
+    for (chainNumber, chain) in zip(chainNumbers, chains) {
+      var cellStart = elapsed
+      cellStarts[chainNumber] = chain.cells.map { cell in
+        defer { cellStart += cell.playbackTime }
+        return cellStart
+      }
+      elapsed += chain.playbackTime
     }
 
     var chapterStarts: [Duration] = []
     for chapter in chapterEntries {
-      guard chain.programs.indices.contains(chapter.program - 1),
-        cellStarts.indices.contains(chain.programs[chapter.program - 1] - 1)
+      let programs = titleSet.programChains[chapter.programChain - 1].programs
+      let starts = cellStarts[chapter.programChain] ?? []
+      guard programs.indices.contains(chapter.program - 1),
+        starts.indices.contains(programs[chapter.program - 1] - 1)
       else { throw .invalidReference("Title \(number) has a Chapter with no Cell") }
-      chapterStarts.append(cellStarts[chain.programs[chapter.program - 1] - 1])
+      chapterStarts.append(starts[programs[chapter.program - 1] - 1])
     }
 
+    let cells = chains.flatMap(\.cells)
     self.number = number
     self.titleSet = entry.titleSet
-    duration = chain.playbackTime
-    chapters = zip(chapterStarts, chapterStarts.dropFirst() + [chain.playbackTime]).map {
+    duration = elapsed
+    chapters = zip(chapterStarts, chapterStarts.dropFirst() + [elapsed]).map {
       Chapter(start: $0, duration: $1 - $0)
     }
-    cells = chain.cells.map { Cell(sectors: $0.sectors, duration: $0.playbackTime) }
+    self.cells = cells.map { Cell(sectors: $0.sectors, duration: $0.playbackTime) }
   }
 }
 
