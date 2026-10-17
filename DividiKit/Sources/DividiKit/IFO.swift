@@ -63,6 +63,39 @@ struct TitleSetIFO {
     let program: Int
   }
 
+  private enum Header {
+    /// The Sector where the Chapter table starts (u32).
+    static let chapterTableSector = 0xC8
+    /// The Sector where the program chain table starts (u32).
+    static let programChainTableSector = 0xCC
+  }
+
+  /// The Chapter table (`VTS_PTT_SRPT`): for each Title, the offset of its list of
+  /// 4-byte Chapter entries. Each list runs until the next one, the last until the table's end.
+  private enum ChapterTable {
+    /// The number of Titles (u16).
+    static let titleCount = 0
+    /// The table's last byte, relative to its start (u32).
+    static let lastByte = 4
+    /// Each Title's list offset, relative to the table's start (u32 each).
+    static let listOffsets = 8
+    static let entrySize = 4
+    /// Within an entry: the program chain (u16).
+    static let programChain = 0
+    /// Within an entry: the program within that chain (u16).
+    static let program = 2
+  }
+
+  /// The program chain table (`VTS_PGCI`): a count, then one 8-byte entry per program chain.
+  private enum ProgramChainTable {
+    /// The number of program chains (u16).
+    static let chainCount = 0
+    static let firstEntry = 8
+    static let entrySize = 8
+    /// Within an entry: the chain's offset, relative to the table's start (u32).
+    static let chainOffset = 4
+  }
+
   /// For each Title in the set, its Chapters' entry points.
   let chapters: [[ChapterEntry]]
   let programChains: [ProgramChain]
@@ -71,28 +104,32 @@ struct TitleSetIFO {
     let ifo = ByteReader(data)
     guard try ifo.bytes(at: 0, count: 12) == Array("DVDVIDEO-VTS".utf8) else { throw .notAnIFO }
 
-    let chapterTable = try ifo.u32(at: 0xC8) * Sector.size
-    let titleCount = try ifo.u16(at: chapterTable)
-    let chapterTableEnd = chapterTable + (try ifo.u32(at: chapterTable + 4)) + 1
+    let chapterTable = try ifo.u32(at: Header.chapterTableSector) * Sector.size
+    let titleCount = try ifo.u16(at: chapterTable + ChapterTable.titleCount)
+    let chapterTableEnd = chapterTable + (try ifo.u32(at: chapterTable + ChapterTable.lastByte)) + 1
     var listStarts: [Int] = []
     for index in 0..<titleCount {
-      listStarts.append(chapterTable + (try ifo.u32(at: chapterTable + 8 + 4 * index)))
+      let listOffset = chapterTable + ChapterTable.listOffsets + 4 * index
+      listStarts.append(chapterTable + (try ifo.u32(at: listOffset)))
     }
     var chapters: [[ChapterEntry]] = []
     for (start, end) in zip(listStarts, listStarts.dropFirst() + [chapterTableEnd]) {
       var list: [ChapterEntry] = []
-      for entry in stride(from: start, to: end, by: 4) {
+      for entry in stride(from: start, to: end, by: ChapterTable.entrySize) {
         list.append(
-          ChapterEntry(programChain: try ifo.u16(at: entry), program: try ifo.u16(at: entry + 2)))
+          ChapterEntry(
+            programChain: try ifo.u16(at: entry + ChapterTable.programChain),
+            program: try ifo.u16(at: entry + ChapterTable.program)))
       }
       chapters.append(list)
     }
     self.chapters = chapters
 
-    let chainTable = try ifo.u32(at: 0xCC) * Sector.size
+    let chainTable = try ifo.u32(at: Header.programChainTableSector) * Sector.size
     var programChains: [ProgramChain] = []
-    for index in 0..<(try ifo.u16(at: chainTable)) {
-      let chain = chainTable + (try ifo.u32(at: chainTable + 8 + 8 * index + 4))
+    for index in 0..<(try ifo.u16(at: chainTable + ProgramChainTable.chainCount)) {
+      let entry = chainTable + ProgramChainTable.firstEntry + ProgramChainTable.entrySize * index
+      let chain = chainTable + (try ifo.u32(at: entry + ProgramChainTable.chainOffset))
       programChains.append(try ProgramChain(ifo, at: chain))
     }
     self.programChains = programChains
@@ -106,27 +143,54 @@ struct ProgramChain {
     let playbackTime: Duration
   }
 
+  /// Fields relative to the start of the program chain.
+  private enum Field {
+    /// The number of programs (u8).
+    static let programCount = 2
+    /// The number of Cells (u8).
+    static let cellCount = 3
+    /// The chain's playback time (BCD, 4 bytes).
+    static let playbackTime = 4
+    /// The offset of the program map: each program's entry Cell (u16; u8 per program).
+    static let programMapOffset = 0xE6
+    /// The offset of the Cell playback table (u16).
+    static let cellTableOffset = 0xE8
+  }
+
+  /// The Cell playback table: one 24-byte entry per Cell, in playback order.
+  private enum CellEntry {
+    static let size = 24
+    /// The Cell's playback time (BCD, 4 bytes).
+    static let playbackTime = 4
+    /// The Cell's first Sector (u32).
+    static let firstSector = 8
+    /// The Cell's last Sector (u32).
+    static let lastSector = 20
+  }
+
   let playbackTime: Duration
   /// The 1-based entry Cell of each program.
   let programs: [Int]
   let cells: [CellPlayback]
 
   init(_ ifo: ByteReader, at start: Int) throws(DiscError.Reason) {
-    let programCount = try ifo.u8(at: start + 2)
-    let cellCount = try ifo.u8(at: start + 3)
-    playbackTime = try ifo.playbackTime(at: start + 4)
+    let programCount = try ifo.u8(at: start + Field.programCount)
+    let cellCount = try ifo.u8(at: start + Field.cellCount)
+    playbackTime = try ifo.playbackTime(at: start + Field.playbackTime)
 
-    let programMap = start + (try ifo.u16(at: start + 0xE6))
+    let programMap = start + (try ifo.u16(at: start + Field.programMapOffset))
     programs = try (0..<programCount).map { (index) throws(DiscError.Reason) in
       try ifo.u8(at: programMap + index)
     }
 
-    let cellTable = start + (try ifo.u16(at: start + 0xE8))
+    let cellTable = start + (try ifo.u16(at: start + Field.cellTableOffset))
     cells = try (0..<cellCount).map { (index) throws(DiscError.Reason) in
-      let cell = cellTable + 24 * index
+      let cell = cellTable + CellEntry.size * index
+      let firstSector = try ifo.u32(at: cell + CellEntry.firstSector)
+      let lastSector = try ifo.u32(at: cell + CellEntry.lastSector)
       return CellPlayback(
-        sectors: try ifo.u32(at: cell + 8)...(try ifo.u32(at: cell + 20)),
-        playbackTime: try ifo.playbackTime(at: cell + 4))
+        sectors: firstSector...lastSector,
+        playbackTime: try ifo.playbackTime(at: cell + CellEntry.playbackTime))
     }
   }
 }

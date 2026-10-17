@@ -53,13 +53,13 @@ struct TestTitleSet {
   fileprivate func ifo() -> Data {
     var chapterTable = ByteWriter()
     chapterTable.u16(chapters.count)
-    chapterTable.u16(0)
+    chapterTable.u16(0)  // reserved
     let listsStart = 8 + 4 * chapters.count
     let end = listsStart + 4 * chapters.joined().count - 1
-    chapterTable.u32(end)
+    chapterTable.u32(end)  // last byte of the table
     var offset = listsStart
     for list in chapters {
-      chapterTable.u32(offset)
+      chapterTable.u32(offset)  // this Title's Chapter list
       offset += 4 * list.count
     }
     for (programChain, program) in chapters.joined() {
@@ -69,14 +69,15 @@ struct TestTitleSet {
 
     var programChainTable = ByteWriter()
     programChainTable.u16(programChains.count)
-    programChainTable.u16(0)
+    programChainTable.u16(0)  // reserved
     let encoded = programChains.map { $0.bytes() }
-    programChainTable.u32(8 + 8 * programChains.count + encoded.map(\.count).reduce(0, +) - 1)
+    let tableSize = 8 + 8 * programChains.count + encoded.map(\.count).reduce(0, +)
+    programChainTable.u32(tableSize - 1)  // last byte of the table
     var programChainOffset = 8 + 8 * programChains.count
     for (chain, bytes) in zip(programChains, encoded) {
-      programChainTable.u8(0x80 | chain.titleInSet)
-      programChainTable.u8(0)
-      programChainTable.u16(0)
+      programChainTable.u8(0x80 | chain.titleInSet)  // entry chain flag | Title
+      programChainTable.u8(0)  // menu and block types
+      programChainTable.u16(0)  // parental mask
       programChainTable.u32(programChainOffset)
       programChainOffset += bytes.count
     }
@@ -85,8 +86,8 @@ struct TestTitleSet {
     var header = ByteWriter()
     header.ascii("DVDVIDEO-VTS")
     let chapterTableSectors = chapterTable.sectorCount
-    header.u32(1, at: 0xC8)
-    header.u32(1 + chapterTableSectors, at: 0xCC)
+    header.u32(1, at: 0xC8)  // Chapter table Sector
+    header.u32(1 + chapterTableSectors, at: 0xCC)  // program chain table Sector
     return layOutIFO(header: header, tables: [chapterTable, programChainTable])
   }
 }
@@ -107,25 +108,25 @@ struct TestProgramChain {
     let cellPositionOffset = cellPlaybackOffset + 24 * cells.count
 
     var chain = ByteWriter()
-    chain.u8(programs.count, at: 2)
-    chain.u8(cells.count, at: 3)
-    chain.bytes(playbackTime.bcd, at: 4)
-    chain.u16(headerSize, at: 0xE6)
-    chain.u16(cellPlaybackOffset, at: 0xE8)
-    chain.u16(cellPositionOffset, at: 0xEA)
+    chain.u8(programs.count, at: 2)  // program count
+    chain.u8(cells.count, at: 3)  // Cell count
+    chain.bytes(playbackTime.bcd, at: 4)  // playback time
+    chain.u16(headerSize, at: 0xE6)  // program map offset
+    chain.u16(cellPlaybackOffset, at: 0xE8)  // Cell playback table offset
+    chain.u16(cellPositionOffset, at: 0xEA)  // Cell position table offset
     for (index, entryCell) in programs.enumerated() {
       chain.u8(entryCell, at: headerSize + index)
     }
     for (index, cell) in cells.enumerated() {
       let offset = cellPlaybackOffset + 24 * index
-      chain.bytes(cell.playbackTime.bcd, at: offset + 4)
-      chain.u32(cell.firstSector, at: offset + 8)
-      chain.u32(cell.lastSector - 1, at: offset + 16)
-      chain.u32(cell.lastSector, at: offset + 20)
+      chain.bytes(cell.playbackTime.bcd, at: offset + 4)  // playback time
+      chain.u32(cell.firstSector, at: offset + 8)  // first Sector
+      chain.u32(cell.lastSector - 1, at: offset + 16)  // last VOBU's first Sector
+      chain.u32(cell.lastSector, at: offset + 20)  // last Sector
     }
     for (index, _) in cells.enumerated() {
-      chain.u16(1, at: cellPositionOffset + 4 * index)
-      chain.u8(index + 1, at: cellPositionOffset + 4 * index + 3)
+      chain.u16(1, at: cellPositionOffset + 4 * index)  // VOB ID
+      chain.u8(index + 1, at: cellPositionOffset + 4 * index + 3)  // Cell ID
     }
     chain.pad(to: cellPositionOffset + 4 * cells.count)
     return chain.data
