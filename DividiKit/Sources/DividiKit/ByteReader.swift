@@ -26,7 +26,11 @@ struct ByteReader {
     return Array(bytes[offset..<offset + count])
   }
 
-  /// A BCD playback time: hours, minutes, seconds, then frames with the frame rate in the top bits.
+  /// A playback time: 4 bytes holding hours, minutes, seconds and frames, each as two BCD digits
+  /// (`0x59` is 59).
+  ///
+  /// The frames byte also holds the frame rate. Its top 2 bits are `01` for 25 fps (PAL) or `11`
+  /// for 29.97 fps (NTSC), and its bottom 6 bits are the frame count, in BCD.
   func playbackTime(at offset: Int) throws(DiscError.Reason) -> Duration {
     func bcd(_ byte: Int) -> Int { (byte >> 4) * 10 + (byte & 0x0F) }
     let hours = try bcd(u8(at: offset))
