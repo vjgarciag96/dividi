@@ -72,17 +72,15 @@ extension Title {
   fileprivate init(number: Int, entry: VideoManagerIFO.TitleEntry, in titleSet: TitleSetIFO)
     throws(DiscError.Reason)
   {
-    guard titleSet.chapters.indices.contains(entry.titleInSet - 1) else {
+    guard let chapterEntries = titleSet.chapters[oneBased: entry.titleInSet] else {
       throw .invalidReference("Title \(number) is missing from its Title Set")
     }
-    let chapterEntries = titleSet.chapters[entry.titleInSet - 1]
     guard let chainNumber = chapterEntries.first?.programChain,
-      titleSet.programChains.indices.contains(chainNumber - 1)
+      let chain = titleSet.programChains[oneBased: chainNumber]
     else { throw .invalidReference("Title \(number) has no program chain") }
     guard chapterEntries.allSatisfy({ $0.programChain == chainNumber }) else {
       throw .invalidReference("Title \(number) spans several program chains")
     }
-    let chain = titleSet.programChains[chainNumber - 1]
 
     // Offset of each Cell from the start of the Title.
     var cellStarts: [Duration] = []
@@ -94,17 +92,18 @@ extension Title {
 
     var chapterStarts: [Duration] = []
     for chapter in chapterEntries {
-      guard chain.programs.indices.contains(chapter.program - 1),
-        cellStarts.indices.contains(chain.programs[chapter.program - 1] - 1)
+      guard let entryCell = chain.programs[oneBased: chapter.program],
+        let start = cellStarts[oneBased: entryCell]
       else { throw .invalidReference("Title \(number) has a Chapter with no Cell") }
-      chapterStarts.append(cellStarts[chain.programs[chapter.program - 1] - 1])
+      chapterStarts.append(start)
     }
 
     self.number = number
     self.titleSet = entry.titleSet
     duration = chain.playbackTime
-    chapters = zip(chapterStarts, chapterStarts.dropFirst() + [chain.playbackTime]).map {
-      Chapter(start: $0, duration: $1 - $0)
+    let ends = chapterStarts.dropFirst() + [chain.playbackTime]
+    chapters = zip(chapterStarts, ends).map { start, end in
+      Chapter(start: start, duration: end - start)
     }
     cells = chain.cells.map { Cell(sectors: $0.sectors, duration: $0.playbackTime) }
   }

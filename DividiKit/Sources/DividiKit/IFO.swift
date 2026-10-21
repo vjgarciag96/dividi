@@ -90,17 +90,17 @@ struct TitleSetIFO {
     let titleCount = try ifo.u16(at: table)
     let tableEnd = table + (try ifo.u32(at: table + 0x04)) + 1
 
-    // Where each Title's list starts, followed by where the last list ends.
-    var boundaries: [Int] = []
+    var listStarts: [Int] = []
     for title in 0..<titleCount {
-      boundaries.append(table + (try ifo.u32(at: table + 0x08 + 4 * title)))
+      listStarts.append(table + (try ifo.u32(at: table + 0x08 + 4 * title)))
     }
-    boundaries.append(tableEnd)
+    // Each list runs until the next Title's list; the last one until the table ends.
+    let listEnds = listStarts.dropFirst() + [tableEnd]
 
     var chapters: [[ChapterEntry]] = []
-    for title in 0..<titleCount {
+    for (start, end) in zip(listStarts, listEnds) {
       var list: [ChapterEntry] = []
-      for chapter in stride(from: boundaries[title], to: boundaries[title + 1], by: 4) {
+      for chapter in stride(from: start, to: end, by: 4) {
         list.append(
           ChapterEntry(
             programChain: try ifo.u16(at: chapter),
@@ -171,5 +171,12 @@ struct ProgramChain {
         sectors: try ifo.u32(at: cell + 0x08)...(try ifo.u32(at: cell + 0x14)),
         playbackTime: try ifo.playbackTime(at: cell + 0x04))
     }
+  }
+}
+
+extension Array {
+  /// DVD-Video numbers are 1-based. Returns nil when the number is missing.
+  subscript(oneBased number: Int) -> Element? {
+    indices.contains(number - 1) ? self[number - 1] : nil
   }
 }
