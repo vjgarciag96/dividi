@@ -9,6 +9,7 @@ import Foundation
 /// `VIDEO_TS.IFO`: the Disc's title table.
 struct VideoManagerIFO {
   struct TitleEntry {
+    let angles: Int
     let titleSet: Int
     let titleInSet: Int
   }
@@ -27,6 +28,7 @@ struct VideoManagerIFO {
   //   0x00  u16       number of Titles (n)
   //   0x08  n × 12    one entry per Title:
   //
+  //     0x01  u8        number of camera angles
   //     0x06  u8        Title Set holding the Title
   //     0x07  u8        the Title's number within its Title Set
   init(_ data: Data) throws(DiscError.Reason) {
@@ -40,6 +42,7 @@ struct VideoManagerIFO {
       let entry = table + 0x08 + 12 * index
       titles.append(
         TitleEntry(
+          angles: try ifo.u8(at: entry + 0x01),
           titleSet: try ifo.u8(at: entry + 0x06),
           titleInSet: try ifo.u8(at: entry + 0x07)))
     }
@@ -152,6 +155,10 @@ struct ProgramChain {
   struct CellPlayback {
     let sectors: ClosedRange<Int>
     let playbackTime: Duration
+    /// Part of a block of Cells that are alternative camera angles.
+    let isAngle: Bool
+    /// Interleaved with other Cells on the Disc, as angles and seamless branches are.
+    let isInterleaved: Bool
   }
 
   let playbackTime: Duration
@@ -174,6 +181,8 @@ struct ProgramChain {
   //
   // Cell playback entry:
   //
+  //   0x00  u8        bits 7–6 block mode, bits 5–4 block type (01 = angle block),
+  //                   bit 2 interleaved
   //   0x04  4 bytes   playback time
   //   0x08  u32       first Sector
   //   0x14  u32       last Sector
@@ -196,9 +205,12 @@ struct ProgramChain {
     let cellTable = start + (try ifo.u16(at: start + 0xE8))
     cells = try (0..<cellCount).map { (index) throws(DiscError.Reason) in
       let cell = cellTable + 24 * index
+      let flags = try ifo.u8(at: cell)
       return CellPlayback(
         sectors: try ifo.u32(at: cell + 0x08)...(try ifo.u32(at: cell + 0x14)),
-        playbackTime: try ifo.playbackTime(at: cell + 0x04))
+        playbackTime: try ifo.playbackTime(at: cell + 0x04),
+        isAngle: flags >> 4 & 0b11 == 0b01,
+        isInterleaved: flags & 0x04 != 0)
     }
   }
 }

@@ -34,7 +34,8 @@ import Testing
         chapters: [Chapter(start: .zero, duration: .milliseconds(90_480))],
         cells: [Cell(sectors: 0...999, duration: .milliseconds(90_480))],
         audioTracks: [AudioTrack(codec: .ac3, channels: 6, language: "en", kind: .normal)],
-        subtitleTracks: [])
+        subtitleTracks: [],
+        unsupportedReason: nil)
     ])
 }
 
@@ -112,6 +113,62 @@ import Testing
       SubtitleTrack(language: "en", kind: .normal),
       SubtitleTrack(language: "en", kind: .forced),
     ])
+}
+
+@Test func multiAngleTitleIsUnsupported() throws {
+  let angleCells = [
+    TestCell(firstSector: 0, lastSector: 99, angleBlock: .firstAngle, interleaved: true),
+    TestCell(firstSector: 100, lastSector: 199, angleBlock: .lastAngle, interleaved: true),
+  ]
+  let disc = TestDisc(
+    titles: [TestTitle(angles: 2)],
+    titleSets: [
+      TestTitleSet(
+        chapters: [[(programChain: 1, program: 1)]],
+        programChains: [TestProgramChain(cells: angleCells)])
+    ])
+
+  let title = try #require(try Disc(reading: disc.source).titles.first)
+
+  #expect(title.unsupportedReason == .multiAngle)
+}
+
+@Test func seamlessBranchingTitleIsUnsupported() throws {
+  let disc = TestDisc(
+    titles: [TestTitle()],
+    titleSets: [
+      TestTitleSet(
+        chapters: [[(programChain: 1, program: 1)]],
+        programChains: [
+          TestProgramChain(cells: [
+            TestCell(firstSector: 0, lastSector: 99),
+            TestCell(firstSector: 100, lastSector: 199, seamless: true, interleaved: true),
+          ])
+        ])
+    ])
+
+  let title = try #require(try Disc(reading: disc.source).titles.first)
+
+  #expect(title.unsupportedReason == .seamlessBranching)
+}
+
+@Test func seamlessCellsWithoutInterleavingAreSupported() throws {
+  let disc = TestDisc(
+    titles: [TestTitle()],
+    titleSets: [
+      TestTitleSet(
+        chapters: [[(programChain: 1, program: 1)]],
+        programChains: [
+          TestProgramChain(cells: [
+            TestCell(firstSector: 0, lastSector: 99),
+            TestCell(firstSector: 100, lastSector: 199, seamless: true),
+          ])
+        ])
+    ])
+
+  let title = try #require(try Disc(reading: disc.source).titles.first)
+
+  #expect(title.unsupportedReason == nil)
 }
 
 @Test func titleSpanningProgramChainsPlaysThemInChapterOrder() throws {
