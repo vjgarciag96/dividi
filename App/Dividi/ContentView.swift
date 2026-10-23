@@ -78,8 +78,12 @@ private struct TitleTable: View {
         .width(70)
       TableColumn("Chapters") { Text($0.chapters.count, format: .number) }
         .width(60)
-      TableColumn("Audio") { Text($0.audioTracks.map(\.label).joined(separator: ", ")) }
-      TableColumn("Subtitles") { Text($0.subtitleTracks.map(\.label).joined(separator: ", ")) }
+      TableColumn("Audio") {
+        Text($0.audioTracks.map(\.label).formatted(.list(type: .and, width: .narrow)))
+      }
+      TableColumn("Subtitles") {
+        Text($0.subtitleTracks.map(\.label).formatted(.list(type: .and, width: .narrow)))
+      }
       TableColumn("Status") { Text($0.status) }
         .width(min: 80, ideal: 160)
     }
@@ -89,9 +93,13 @@ private struct TitleTable: View {
 extension Title {
   fileprivate var status: String {
     switch unsupportedReason {
-    case nil: "OK"
-    case .multiAngle: "Unsupported: multi-angle"
-    case .seamlessBranching: "Unsupported: seamless branching"
+    case nil: String(localized: "OK", comment: "Status of a Title dividi can extract")
+    case .multiAngle:
+      String(localized: "Unsupported: multi-angle", comment: "Status of a multi-angle Title")
+    case .seamlessBranching:
+      String(
+        localized: "Unsupported: seamless branching",
+        comment: "Status of a Title using seamless branching")
     }
   }
 }
@@ -99,6 +107,7 @@ extension Title {
 extension AudioTrack {
   /// E.g. "en AC-3 6ch (commentary)".
   fileprivate var label: String {
+    let language = language ?? unknownLanguage
     let codec =
       switch codec {
       case .ac3: "AC-3"
@@ -106,36 +115,53 @@ extension AudioTrack {
       case .mpeg2: "MPEG-2"
       case .lpcm: "LPCM"
       case .dts: "DTS"
-      case .unknown: "unknown"
+      case .unknown: String(localized: "unknown", comment: "Codec of an audio Track")
       }
     let kind: String? =
       switch kind {
       case .unspecified, .normal: nil
-      case .visuallyImpaired: "visually impaired"
-      case .directorsComments, .alternateDirectorsComments: "commentary"
+      case .visuallyImpaired:
+        String(localized: "visually impaired", comment: "Kind of audio Track")
+      case .directorsComments, .alternateDirectorsComments:
+        String(localized: "commentary", comment: "Kind of audio or subtitle Track")
       }
-    return ["\(language ?? "??") \(codec) \(channels)ch", kind.map { "(\($0))" }]
-      .compactMap { $0 }.joined(separator: " ")
+    guard let kind else {
+      return String(
+        localized: "\(language) \(codec) \(channels)ch",
+        comment: "Audio Track: language code, codec, channel count")
+    }
+    return String(
+      localized: "\(language) \(codec) \(channels)ch (\(kind))",
+      comment: "Audio Track: language code, codec, channel count, kind")
   }
 }
 
 extension SubtitleTrack {
   /// E.g. "en (forced)".
   fileprivate var label: String {
+    let language = language ?? unknownLanguage
     let kind: String? =
       switch kind {
       case .unspecified, .normal: nil
-      case .large: "large"
-      case .children: "children"
-      case .captions: "captions"
-      case .largeCaptions: "large captions"
-      case .childrensCaptions: "children's captions"
-      case .forced: "forced"
-      case .directorsComments, .largeDirectorsComments, .childrensDirectorsComments: "commentary"
+      case .large: String(localized: "large", comment: "Kind of subtitle Track")
+      case .children: String(localized: "children", comment: "Kind of subtitle Track")
+      case .captions: String(localized: "captions", comment: "Kind of subtitle Track")
+      case .largeCaptions: String(localized: "large captions", comment: "Kind of subtitle Track")
+      case .childrensCaptions:
+        String(localized: "children's captions", comment: "Kind of subtitle Track")
+      case .forced: String(localized: "forced", comment: "Kind of subtitle Track")
+      case .directorsComments, .largeDirectorsComments, .childrensDirectorsComments:
+        String(localized: "commentary", comment: "Kind of audio or subtitle Track")
       }
-    return [language ?? "??", kind.map { "(\($0))" }].compactMap { $0 }.joined(separator: " ")
+    guard let kind else { return language }
+    return String(
+      localized: "\(language) (\(kind))", comment: "Subtitle Track: language code, kind")
   }
 }
+
+/// Shown in place of a Track's language code when the Disc doesn't give one.
+private let unknownLanguage = String(
+  localized: "??", comment: "Placeholder for a Track's missing language code")
 
 #Preview {
   ContentView()

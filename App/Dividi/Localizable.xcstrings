@@ -1,0 +1,114 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "%@ %@ %lldch" : {
+      "comment" : "Audio Track: language code, codec, channel count",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@ %2$@ %3$lldch"
+          }
+        }
+      }
+    },
+    "%@ %@ %lldch (%@)" : {
+      "comment" : "Audio Track: language code, codec, channel count, kind",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@ %2$@ %3$lldch (%4$@)"
+          }
+        }
+      }
+    },
+    "%@ (%@)" : {
+      "comment" : "Subtitle Track: language code, kind",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@ (%2$@)"
+          }
+        }
+      }
+    },
+    "??" : {
+      "comment" : "Placeholder for a Track's missing language code"
+    },
+    "Audio" : {
+
+    },
+    "Chapters" : {
+
+    },
+    "Couldn't Read Disc" : {
+
+    },
+    "Dividi" : {
+
+    },
+    "Duration" : {
+
+    },
+    "No Source" : {
+
+    },
+    "OK" : {
+      "comment" : "Status of a Title dividi can extract"
+    },
+    "Open a VIDEO_TS folder, or the folder containing it." : {
+
+    },
+    "Open…" : {
+
+    },
+    "Reading Disc…" : {
+
+    },
+    "Status" : {
+
+    },
+    "Subtitles" : {
+
+    },
+    "Title" : {
+
+    },
+    "Unsupported: multi-angle" : {
+      "comment" : "Status of a multi-angle Title"
+    },
+    "Unsupported: seamless branching" : {
+      "comment" : "Status of a Title using seamless branching"
+    },
+    "captions" : {
+      "comment" : "Kind of subtitle Track"
+    },
+    "children" : {
+      "comment" : "Kind of subtitle Track"
+    },
+    "children's captions" : {
+      "comment" : "Kind of subtitle Track"
+    },
+    "commentary" : {
+      "comment" : "Kind of audio or subtitle Track"
+    },
+    "forced" : {
+      "comment" : "Kind of subtitle Track"
+    },
+    "large" : {
+      "comment" : "Kind of subtitle Track"
+    },
+    "large captions" : {
+      "comment" : "Kind of subtitle Track"
+    },
+    "unknown" : {
+      "comment" : "Codec of an audio Track"
+    },
+    "visually impaired" : {
+      "comment" : "Kind of audio Track"
+    }
+  },
+  "version" : "1.0"
+}
