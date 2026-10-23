@@ -47,7 +47,7 @@ struct VideoManagerIFO {
   }
 }
 
-/// `VTS_xx_0.IFO`: a Title Set's Chapters and program chains.
+/// `VTS_xx_0.IFO`: a Title Set's streams, Chapters and program chains.
 struct TitleSetIFO {
   /// A Chapter's entry point: a program within a program chain, both 1-based.
   struct ChapterEntry {
@@ -55,6 +55,8 @@ struct TitleSetIFO {
     let program: Int
   }
 
+  let audioTracks: [AudioTrack]
+  let subtitleTracks: [SubtitleTrack]
   /// For each Title in the set, its Chapters' entry points.
   let chapters: [[ChapterEntry]]
   let programChains: [ProgramChain]
@@ -64,9 +66,25 @@ struct TitleSetIFO {
   //   0x000  12 bytes  "DVDVIDEO-VTS"
   //   0x0C8  u32       Sector where the Chapter table starts
   //   0x0CC  u32       Sector where the program chain table starts
+  //   0x202  u16       number of audio streams (at most 8)
+  //   0x204  8 × 8     audio attributes, one entry per stream
+  //   0x254  u16       number of subtitle streams (at most 32)
+  //   0x256  32 × 6    subtitle attributes, one entry per stream
   init(_ data: Data) throws(DiscError.Reason) {
     let ifo = ByteReader(data)
     guard try ifo.bytes(at: 0, count: 12) == Array("DVDVIDEO-VTS".utf8) else { throw .notAnIFO }
+
+    var audioTracks: [AudioTrack] = []
+    for index in 0..<min(try ifo.u16(at: 0x202), 8) {
+      audioTracks.append(try AudioTrack(ifo, at: 0x204 + 8 * index))
+    }
+    self.audioTracks = audioTracks
+
+    var subtitleTracks: [SubtitleTrack] = []
+    for index in 0..<min(try ifo.u16(at: 0x254), 32) {
+      subtitleTracks.append(try SubtitleTrack(ifo, at: 0x256 + 6 * index))
+    }
+    self.subtitleTracks = subtitleTracks
 
     chapters = try Self.chapters(ifo, at: try ifo.u32(at: 0x0C8) * Sector.size)
     programChains = try Self.programChains(ifo, at: try ifo.u32(at: 0x0CC) * Sector.size)
@@ -140,12 +158,17 @@ struct ProgramChain {
   /// The 1-based entry Cell of each program.
   let programs: [Int]
   let cells: [CellPlayback]
+  /// Whether each of the Title Set's audio streams is used by this chain.
+  let usesAudio: [Bool]
+  let usesSubtitles: [Bool]
 
   // Program chain (PGC). Offsets inside it are relative to its start:
   //
   //   0x02  u8        number of programs
   //   0x03  u8        number of Cells
   //   0x04  4 bytes   playback time (see `ByteReader.playbackTime(at:)`)
+  //   0x0C  8 × 2     audio stream control: top bit set if the chain uses that stream
+  //   0x1C  32 × 4    subtitle stream control: top bit set if the chain uses that stream
   //   0xE6  u16       offset of the program map: each program's entry Cell, a u8 each
   //   0xE8  u16       offset of the Cell playback table: 24 bytes per Cell, in playback order
   //
@@ -158,6 +181,12 @@ struct ProgramChain {
     let programCount = try ifo.u8(at: start + 0x02)
     let cellCount = try ifo.u8(at: start + 0x03)
     playbackTime = try ifo.playbackTime(at: start + 0x04)
+    usesAudio = try (0..<8).map { (index) throws(DiscError.Reason) in
+      try ifo.u8(at: start + 0x0C + 2 * index) & 0x80 != 0
+    }
+    usesSubtitles = try (0..<32).map { (index) throws(DiscError.Reason) in
+      try ifo.u8(at: start + 0x1C + 4 * index) & 0x80 != 0
+    }
 
     let programMap = start + (try ifo.u16(at: start + 0xE6))
     programs = try (0..<programCount).map { (index) throws(DiscError.Reason) in
@@ -179,4 +208,69 @@ extension Array {
   subscript(oneBased number: Int) -> Element? {
     indices.contains(number - 1) ? self[number - 1] : nil
   }
+}
+
+extension AudioTrack {
+  // Audio attributes entry, 8 bytes:
+  //
+  //   0x00  u8        bits 7–5 coding mode
+  //   0x01  u8        bits 2–0 channel count minus 1
+  //   0x02  2 bytes   language code, ASCII
+  //   0x05  u8        kind (code extension)
+  init(_ ifo: ByteReader, at offset: Int) throws(DiscError.Reason) {
+    codec =
+      switch try ifo.u8(at: offset) >> 5 {
+      case 0: .ac3
+      case 2: .mpeg1
+      case 3: .mpeg2
+      case 4: .lpcm
+      case 6: .dts
+      default: .unknown
+      }
+    channels = (try ifo.u8(at: offset + 0x01) & 0x07) + 1
+    language = try languageCode(ifo, at: offset + 0x02)
+    kind =
+      switch try ifo.u8(at: offset + 0x05) {
+      case 1: .normal
+      case 2: .visuallyImpaired
+      case 3: .directorsComments
+      case 4: .alternateDirectorsComments
+      default: .unspecified
+      }
+  }
+}
+
+extension SubtitleTrack {
+  // Subtitle attributes entry, 6 bytes:
+  //
+  //   0x02  2 bytes   language code, ASCII
+  //   0x05  u8        kind (code extension)
+  init(_ ifo: ByteReader, at offset: Int) throws(DiscError.Reason) {
+    language = try languageCode(ifo, at: offset + 0x02)
+    kind =
+      switch try ifo.u8(at: offset + 0x05) {
+      case 1: .normal
+      case 2: .large
+      case 3: .children
+      case 5: .captions
+      case 6: .largeCaptions
+      case 7: .childrensCaptions
+      case 9: .forced
+      case 13: .directorsComments
+      case 14: .largeDirectorsComments
+      case 15: .childrensDirectorsComments
+      default: .unspecified
+      }
+  }
+}
+
+/// A raw 2-letter language code, or `nil` when the bytes aren't letters.
+private func languageCode(_ ifo: ByteReader, at offset: Int) throws(DiscError.Reason) -> String? {
+  let bytes = try ifo.bytes(at: offset, count: 2)
+  guard
+    bytes.allSatisfy({
+      Character(UnicodeScalar($0)).isASCII && Character(UnicodeScalar($0)).isLetter
+    })
+  else { return nil }
+  return String(decoding: bytes, as: UTF8.self)
 }
