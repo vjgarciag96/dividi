@@ -36,6 +36,13 @@ public enum MKV: Sendable {
     public let displayAspect: DisplayAspect
     public let packets: [Packet]
 
+    public init(width: Int, height: Int, displayAspect: DisplayAspect, packets: [Packet]) {
+      self.width = width
+      self.height = height
+      self.displayAspect = displayAspect
+      self.packets = packets
+    }
+
     /// Display aspect stored as Matroska DisplayWidth and DisplayHeight.
     public enum DisplayAspect: Equatable, Sendable {
       case fourByThree
@@ -60,6 +67,12 @@ public enum MKV: Sendable {
     /// Number of audio channels, e.g. 2 for stereo.
     public let channels: Int
     public let packets: [Packet]
+
+    public init(sampleRate: Int, channels: Int, packets: [Packet]) {
+      self.sampleRate = sampleRate
+      self.channels = channels
+      self.packets = packets
+    }
   }
 
   /// Remuxes one video stream and one audio stream into MKV bytes.
