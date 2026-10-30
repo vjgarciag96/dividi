@@ -17,6 +17,7 @@ public enum MKV: Sendable {
     /// How long this frame plays for.
     public let duration: Duration
     /// Whether a player can seek to this frame and decode from here without earlier frames.
+    /// Ignored for audio: every AC-3 frame decodes on its own, so each one is a keyframe.
     public let isKeyframe: Bool
 
     public init(bytes: Data, presentation: Duration, duration: Duration, isKeyframe: Bool) {
@@ -237,7 +238,7 @@ private struct Timeline {
           tick: ticks(packet.presentation),
           bytes: packet.bytes,
           endTick: ticks(packet.presentation + packet.duration),
-          isKeyframe: packet.isKeyframe))
+          isKeyframe: slot == .audio || packet.isKeyframe))
     }
     return pending
   }

@@ -103,6 +103,21 @@ func realStreamsRoundTrip(aspect: MKV.Video.DisplayAspect) throws {
   #expect(Double(bitPattern: duration.body.reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }) == 65_640)
 }
 
+@Test func everyAudioFrameIsAKeyframe() throws {
+  let video = MKV.Packet(
+    bytes: Data([0]), presentation: .zero, duration: .milliseconds(40), isKeyframe: true)
+  let audio = [0, 32].map { time in
+    MKV.Packet(
+      bytes: Data([0]), presentation: .milliseconds(time), duration: .milliseconds(32),
+      isKeyframe: false)
+  }
+  let data = try MKV.data(
+    video: MKV.Video(width: 720, height: 480, displayAspect: .fourByThree, packets: [video]),
+    audio: MKV.Audio(sampleRate: 48_000, channels: 2, packets: audio))
+  let audioFlags = elements(data).filter { $0.id == 0xA3 && $0.body[0] == 0x82 }.map { $0.body[3] }
+  #expect(audioFlags == [0x80, 0x80])
+}
+
 @Test func rejectsInvalidInput() {
   let packet = MKV.Packet(
     bytes: Data([0]), presentation: .zero, duration: .milliseconds(40), isKeyframe: true)
