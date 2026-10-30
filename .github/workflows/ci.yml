@@ -19,6 +19,9 @@ jobs:
       - name: Lint formatting
         run: git ls-files -z '*.swift' | xargs -0 swift format lint --strict --parallel
 
+      - name: Install ffmpeg and ffprobe
+        run: brew install ffmpeg
+
       - name: Test engine
         working-directory: DividiKit
         run: swift test

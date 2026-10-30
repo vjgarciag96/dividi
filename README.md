@@ -43,6 +43,7 @@ Vocabulary is defined in [CONTEXT.md](CONTEXT.md); key decisions are tracked as 
 
 - Automated tests run on GitHub Actions: format lint, engine tests and an app build.
 - IFO parsing is tested with synthetic IFO bytes built by the tests.
+- MKV tests require `ffmpeg` and `ffprobe` on PATH (`brew install ffmpeg`). They generate MPEG-2 video with B-frames and AC-3 audio, then verify packet preservation, timing, aspect ratio, decoded video hashes, and that the audio decodes cleanly. These tools are development dependencies only.
 - Real disc samples (copyrighted) may be used for local testing only and are never committed.
 
 ## Roadmap
@@ -56,7 +57,7 @@ Vocabulary is defined in [CONTEXT.md](CONTEXT.md); key decisions are tracked as 
 
 - Heuristics for labelling and pre-selecting titles (episodes, extras, "Play All").
 - How tracks are chosen.
-- Test fixtures for the demuxer and MKV writer.
+- Test fixtures for the demuxer.
 - Remembering discs between sessions.
 - Decryption ([#3](https://github.com/vjgarciag96/dividi/issues/3)).
 - Thumbnails and previews (for now: "Open in VLC").
