@@ -134,28 +134,33 @@ private enum TimestampScale {
   static let maxBackwardRelativeTick = UInt64(Int16.max) + 1
 }
 
-private enum StreamSlot {
-  case video
-  case audio
-
-  var trackNumber: UInt64 {
+extension MKVError.Stream {
+  fileprivate var trackNumber: UInt64 {
     switch self {
     case .video: 1
     case .audio: 2
     }
   }
 
-  var trackType: UInt64 {
+  fileprivate var trackType: UInt64 {
     switch self {
     case .video: 1
     case .audio: 2
     }
   }
 
-  var codecID: String {
+  fileprivate var codecID: String {
     switch self {
     case .video: "V_MPEG2"
     case .audio: "A_AC3"
+    }
+  }
+
+  /// The Video or Audio element that holds this track's settings.
+  fileprivate var settingsID: [UInt8] {
+    switch self {
+    case .video: ElementID.video
+    case .audio: ElementID.audio
     }
   }
 }
@@ -177,7 +182,7 @@ private struct Cluster {
 }
 
 private struct Block {
-  var slot: StreamSlot
+  var stream: MKVError.Stream
   var relativeTicks: Int16
   var bytes: Data
   var isKeyframe: Bool
@@ -194,7 +199,7 @@ private struct Timeline {
   var durationTicks: UInt64
 
   private struct Pending {
-    var slot: StreamSlot
+    var stream: MKVError.Stream
     var tick: UInt64
     var bytes: Data
     var endTick: UInt64
@@ -209,8 +214,8 @@ private struct Timeline {
     guard !video.packets.isEmpty else { throw .emptyPackets(.video) }
     guard !audio.packets.isEmpty else { throw .emptyPackets(.audio) }
 
-    let videoPackets = try timed(video.packets, slot: .video, stream: .video)
-    let audioPackets = try timed(audio.packets, slot: .audio, stream: .audio)
+    let videoPackets = try timed(video.packets, stream: .video)
+    let audioPackets = try timed(audio.packets, stream: .audio)
     let merged = merge(video: videoPackets, audio: audioPackets)
     return Timeline(
       width: video.width,
@@ -223,7 +228,7 @@ private struct Timeline {
   }
 
   private static func timed(
-    _ packets: [MKV.Packet], slot: StreamSlot, stream: MKVError.Stream
+    _ packets: [MKV.Packet], stream: MKVError.Stream
   ) throws(MKVError) -> [Pending] {
     var pending: [Pending] = []
     pending.reserveCapacity(packets.count)
@@ -234,11 +239,11 @@ private struct Timeline {
       guard packet.duration > .zero else { throw .nonPositiveDuration(stream) }
       pending.append(
         Pending(
-          slot: slot,
+          stream: stream,
           tick: ticks(packet.presentation),
           bytes: packet.bytes,
           endTick: ticks(packet.presentation + packet.duration),
-          isKeyframe: slot == .audio || packet.isKeyframe))
+          isKeyframe: stream == .audio || packet.isKeyframe))
     }
     return pending
   }
@@ -300,7 +305,7 @@ private struct Timeline {
         : -Int64(timestamp - packet.tick)
       blocks.append(
         Block(
-          slot: packet.slot,
+          stream: packet.stream,
           relativeTicks: Int16(relative),
           bytes: packet.bytes,
           isKeyframe: packet.isKeyframe))
@@ -370,13 +375,25 @@ private enum EBML {
 
     mutating func simpleBlock(_ block: Block) {
       var body = Data()
-      body.append(contentsOf: Self.vint(block.slot.trackNumber))
+      body.append(contentsOf: Self.vint(block.stream.trackNumber))
       let relative = UInt16(bitPattern: block.relativeTicks)
       body.append(UInt8(relative >> 8))
       body.append(UInt8(truncatingIfNeeded: relative))
       body.append(block.isKeyframe ? 0x80 : 0)
       body.append(block.bytes)
       element(ElementID.simpleBlock, body)
+    }
+
+    /// A TrackEntry for one stream; `settings` fills its Video or Audio element.
+    mutating func trackEntry(_ stream: MKVError.Stream, settings: (inout Buffer) -> Void) {
+      master(ElementID.trackEntry) { entry in
+        entry.uint(ElementID.trackNumber, stream.trackNumber)
+        entry.uint(ElementID.trackUID, stream.trackNumber)
+        entry.uint(ElementID.trackType, stream.trackType)
+        entry.uint(ElementID.flagLacing, 0)
+        entry.string(ElementID.codecID, stream.codecID)
+        entry.master(stream.settingsID, settings)
+      }
     }
 
     private mutating func element(_ id: [UInt8], _ body: Data) {
@@ -455,31 +472,17 @@ private enum EBML {
         info.string(ElementID.writingApp, Container.writerName)
       }
       segment.master(ElementID.tracks) { tracks in
-        tracks.master(ElementID.trackEntry) { entry in
-          entry.uint(ElementID.trackNumber, StreamSlot.video.trackNumber)
-          entry.uint(ElementID.trackUID, StreamSlot.video.trackNumber)
-          entry.uint(ElementID.trackType, StreamSlot.video.trackType)
-          entry.uint(ElementID.flagLacing, 0)
-          entry.string(ElementID.codecID, StreamSlot.video.codecID)
-          entry.master(ElementID.video) { video in
-            video.uint(ElementID.pixelWidth, UInt64(timeline.width))
-            video.uint(ElementID.pixelHeight, UInt64(timeline.height))
-            let ratio = timeline.displayAspect.ratio
-            video.uint(ElementID.displayWidth, UInt64(ratio.width))
-            video.uint(ElementID.displayHeight, UInt64(ratio.height))
-            video.uint(ElementID.displayUnit, Container.displayUnitAspectRatio)
-          }
+        tracks.trackEntry(.video) { video in
+          video.uint(ElementID.pixelWidth, UInt64(timeline.width))
+          video.uint(ElementID.pixelHeight, UInt64(timeline.height))
+          let ratio = timeline.displayAspect.ratio
+          video.uint(ElementID.displayWidth, UInt64(ratio.width))
+          video.uint(ElementID.displayHeight, UInt64(ratio.height))
+          video.uint(ElementID.displayUnit, Container.displayUnitAspectRatio)
         }
-        tracks.master(ElementID.trackEntry) { entry in
-          entry.uint(ElementID.trackNumber, StreamSlot.audio.trackNumber)
-          entry.uint(ElementID.trackUID, StreamSlot.audio.trackNumber)
-          entry.uint(ElementID.trackType, StreamSlot.audio.trackType)
-          entry.uint(ElementID.flagLacing, 0)
-          entry.string(ElementID.codecID, StreamSlot.audio.codecID)
-          entry.master(ElementID.audio) { audio in
-            audio.float(ElementID.samplingFrequency, Double(timeline.sampleRate))
-            audio.uint(ElementID.channels, UInt64(timeline.channels))
-          }
+        tracks.trackEntry(.audio) { audio in
+          audio.float(ElementID.samplingFrequency, Double(timeline.sampleRate))
+          audio.uint(ElementID.channels, UInt64(timeline.channels))
         }
       }
       for cluster in timeline.clusters {
