@@ -219,7 +219,7 @@ private struct Timeline {
       sampleRate: audio.sampleRate,
       channels: audio.channels,
       clusters: clusters(merged),
-      durationTicks: merged.map(\.endTick).max()!)
+      durationTicks: merged.reduce(0) { max($0, $1.endTick) })
   }
 
   private static func timed(
