@@ -8,15 +8,26 @@ import Foundation
 /// `data(video:audio:)` is pure. The same inputs return the same bytes. Payloads
 /// are copied. The caller keeps any file path.
 public enum MKV: Sendable {
-  /// Elementary-stream bytes and the time they are presented, counted from the
-  /// start of the Extraction. The same `Duration` a Title uses.
+  /// One encoded video or audio frame and when it plays, counted from the start
+  /// of the Extraction. The same `Duration` a Title uses.
   public struct Packet: Equatable, Sendable {
     public let bytes: Data
-    /// Presentation time from the start of the Extraction.
+    /// When this frame starts playing, counted from the start of the Extraction.
     public let presentation: Duration
+    /// How long this frame plays for.
+    public let duration: Duration
+    /// Whether a player can seek to this frame and decode from here without earlier frames.
+    public let isKeyframe: Bool
+
+    public init(bytes: Data, presentation: Duration, duration: Duration, isKeyframe: Bool) {
+      self.bytes = bytes
+      self.presentation = presentation
+      self.duration = duration
+      self.isKeyframe = isKeyframe
+    }
   }
 
-  /// MPEG-2 elementary stream for one Extraction.
+  /// MPEG-2 video for one Extraction.
   public struct Video: Equatable, Sendable {
     /// Coded width, in pixels.
     public let width: Int
@@ -40,12 +51,13 @@ public enum MKV: Sendable {
     }
   }
 
-  /// AC-3 elementary stream for one Extraction.
+  /// AC-3 audio for one Extraction.
   ///
   /// An `AudioTrack` is a stream the Disc offers. The caller has already chosen
   /// one and split its packets into this value.
   public struct Audio: Equatable, Sendable {
     public let sampleRate: Int
+    /// Number of audio channels, e.g. 2 for stereo.
     public let channels: Int
     public let packets: [Packet]
   }
@@ -77,8 +89,8 @@ public enum MKVError: Error, Equatable, Sendable {
   case emptyPackets(Stream)
   /// A packet's presentation time is negative.
   case negativePresentation(Stream)
-  /// A packet's presentation time is earlier than the previous packet of that input.
-  case backwardsPresentation(Stream)
+  /// A packet's duration is zero or negative.
+  case nonPositiveDuration(Stream)
   /// That field is zero or negative.
   case nonPositive(Field)
 }
@@ -90,8 +102,8 @@ extension MKVError: LocalizedError {
     case .emptyPackets(.audio): "the audio has no packets"
     case .negativePresentation(.video): "a video packet's presentation time is negative"
     case .negativePresentation(.audio): "an audio packet's presentation time is negative"
-    case .backwardsPresentation(.video): "a video packet's presentation time moves backwards"
-    case .backwardsPresentation(.audio): "an audio packet's presentation time moves backwards"
+    case .nonPositiveDuration(.video): "a video packet duration is zero or negative"
+    case .nonPositiveDuration(.audio): "an audio packet duration is zero or negative"
     case .nonPositive(.width): "the picture width is zero or negative"
     case .nonPositive(.height): "the picture height is zero or negative"
     case .nonPositive(.sampleRate): "the sample rate is zero or negative"
@@ -101,8 +113,11 @@ extension MKVError: LocalizedError {
 }
 
 private enum TimestampScale {
+  /// One Matroska tick equals this many nanoseconds, so each tick is one millisecond.
   static let nanoseconds: UInt64 = 1_000_000
-  static let maxRelativeTick: UInt64 = 32_767
+  /// SimpleBlock relative timestamps are Int16, so +32_767 forward and −32_768 back.
+  static let maxForwardRelativeTick = UInt64(Int16.max)
+  static let maxBackwardRelativeTick = UInt64(Int16.max) + 1
 }
 
 private enum StreamSlot {
@@ -140,10 +155,18 @@ private enum Container {
   static let writerName = "dividi"
 }
 
-/// SimpleBlock flag byte. Bit 7 is the keyframe. Every block sets it because
-/// payloads are copied and this writer does not look for an MPEG-2 I-frame.
-private enum SimpleBlockHeader {
-  static let flags: UInt8 = 0x80
+/// A Matroska Cluster: a run of frames that share one base timestamp; each
+/// block stores its time as an offset from that base.
+private struct Cluster {
+  var timestampTicks: UInt64
+  var blocks: [Block]
+}
+
+private struct Block {
+  var slot: StreamSlot
+  var relativeTicks: Int16
+  var bytes: Data
+  var isKeyframe: Bool
 }
 
 private struct Timeline {
@@ -153,12 +176,15 @@ private struct Timeline {
   var sampleRate: Int
   var channels: Int
   var clusters: [Cluster]
+  /// End of the longest track, in Matroska ticks (milliseconds at `TimestampScale`).
   var durationTicks: UInt64
 
   private struct Pending {
     var slot: StreamSlot
     var tick: UInt64
     var bytes: Data
+    var endTick: UInt64
+    var isKeyframe: Bool
   }
 
   static func make(video: MKV.Video, audio: MKV.Audio) throws(MKVError) -> Timeline {
@@ -179,36 +205,39 @@ private struct Timeline {
       sampleRate: audio.sampleRate,
       channels: audio.channels,
       clusters: clusters(merged),
-      durationTicks: merged[merged.count - 1].tick)
+      durationTicks: merged.map(\.endTick).max()!)
   }
 
   private static func timed(
     _ packets: [MKV.Packet], slot: StreamSlot, stream: MKVError.Stream
   ) throws(MKVError) -> [Pending] {
-    var previous: Duration?
     var pending: [Pending] = []
     pending.reserveCapacity(packets.count)
     for packet in packets {
       if packet.presentation < .zero {
         throw .negativePresentation(stream)
       }
-      if let previous, packet.presentation < previous {
-        throw .backwardsPresentation(stream)
-      }
+      guard packet.duration > .zero else { throw .nonPositiveDuration(stream) }
       pending.append(
-        Pending(slot: slot, tick: ticks(packet.presentation), bytes: packet.bytes))
-      previous = packet.presentation
+        Pending(
+          slot: slot,
+          tick: ticks(packet.presentation),
+          bytes: packet.bytes,
+          endTick: ticks(packet.presentation + packet.duration),
+          isKeyframe: packet.isKeyframe))
     }
     return pending
   }
 
   private static func ticks(_ presentation: Duration) -> UInt64 {
     let (seconds, attoseconds) = presentation.components
-    // seconds * 1_000, not seconds * 10^18. Multiplying by 10^18 overflows Int64 past 9 seconds.
+    // One millisecond is 10^15 attoseconds; convert the fractional second that way.
+    let attosecondsPerMillisecond: Int64 = 1_000_000_000_000_000
     let whole = UInt64(seconds) * 1_000
-    let fraction = attoseconds / 1_000_000_000_000_000
+    let fraction = attoseconds / attosecondsPerMillisecond
     var ticks = whole + UInt64(fraction)
-    if attoseconds % 1_000_000_000_000_000 >= 500_000_000_000_000 {
+    // Round half-up so 0.5 ms and above become the next tick.
+    if attoseconds % attosecondsPerMillisecond >= attosecondsPerMillisecond / 2 {
       ticks += 1
     }
     return ticks
@@ -228,8 +257,8 @@ private struct Timeline {
         audioIndex += 1
       }
     }
-    merged.append(contentsOf: video[videoIndex...])
-    merged.append(contentsOf: audio[audioIndex...])
+    merged.append(contentsOf: video.suffix(from: videoIndex))
+    merged.append(contentsOf: audio.suffix(from: audioIndex))
     return merged
   }
 
@@ -238,28 +267,33 @@ private struct Timeline {
     var timestamp = packets[0].tick
     var blocks: [Block] = []
     for packet in packets {
-      if packet.tick - timestamp > TimestampScale.maxRelativeTick {
+      // A block can only store an Int16 offset from the cluster timestamp. When a
+      // packet falls outside that range (common once the timeline grows past ~33 s,
+      // or when B-frames sit behind a new cluster base), close the current cluster
+      // and start a new one whose base is this packet's tick.
+      let outsideCluster =
+        packet.tick >= timestamp
+        ? packet.tick - timestamp > TimestampScale.maxForwardRelativeTick
+        : timestamp - packet.tick > TimestampScale.maxBackwardRelativeTick
+      if outsideCluster {
         clusters.append(Cluster(timestampTicks: timestamp, blocks: blocks))
         timestamp = packet.tick
         blocks = []
       }
-      let relative = packet.tick - timestamp
-      blocks.append(Block(slot: packet.slot, relativeTicks: Int16(relative), bytes: packet.bytes))
+      let relative =
+        packet.tick >= timestamp
+        ? Int64(packet.tick - timestamp)
+        : -Int64(timestamp - packet.tick)
+      blocks.append(
+        Block(
+          slot: packet.slot,
+          relativeTicks: Int16(relative),
+          bytes: packet.bytes,
+          isKeyframe: packet.isKeyframe))
     }
     clusters.append(Cluster(timestampTicks: timestamp, blocks: blocks))
     return clusters
   }
-}
-
-private struct Cluster {
-  var timestampTicks: UInt64
-  var blocks: [Block]
-}
-
-private struct Block {
-  var slot: StreamSlot
-  var relativeTicks: Int16
-  var bytes: Data
 }
 
 private enum ElementID {
@@ -299,6 +333,95 @@ private enum ElementID {
 }
 
 private enum EBML {
+  private struct Buffer {
+    var data = Data()
+
+    mutating func master(_ id: [UInt8], _ build: (inout Buffer) -> Void) {
+      var child = Buffer()
+      build(&child)
+      element(id, child.data)
+    }
+
+    mutating func uint(_ id: [UInt8], _ value: UInt64) {
+      element(id, Self.unsigned(value))
+    }
+
+    mutating func float(_ id: [UInt8], _ value: Double) {
+      element(id, Self.float64(value))
+    }
+
+    mutating func string(_ id: [UInt8], _ value: String) {
+      element(id, Data(value.utf8))
+    }
+
+    mutating func simpleBlock(_ block: Block) {
+      var body = Data()
+      body.append(contentsOf: Self.vint(block.slot.trackNumber))
+      let relative = UInt16(bitPattern: block.relativeTicks)
+      body.append(UInt8(relative >> 8))
+      body.append(UInt8(truncatingIfNeeded: relative))
+      body.append(block.isKeyframe ? 0x80 : 0)
+      body.append(block.bytes)
+      element(ElementID.simpleBlock, body)
+    }
+
+    private mutating func element(_ id: [UInt8], _ body: Data) {
+      data.append(contentsOf: id)
+      data.append(contentsOf: Self.vint(UInt64(body.count)))
+      data.append(body)
+    }
+
+    /// Encodes an EBML variable-length integer: the leading byte's high bits mark
+    /// the width, and the remaining bits hold the value. All-ones is reserved for
+    /// an unknown size, so width `w` stops at `2^(7w) - 2`.
+    private static func vint(_ value: UInt64) -> [UInt8] {
+      var width = 1
+      // Width marker sits in the first byte (w-1 zeros, then a 1); remaining bits are
+      // the value. With n = 7w value bits you get 2^n patterns (0 through 2^n-1); the
+      // last pattern (all ones) means "unknown size", so real values stop one earlier.
+      // width 1 → n=7 → max 126; width 2 → n=14 → max 16_382. Grow until value fits.
+      while value > (UInt64(1) << (7 * width)) - 2 {
+        width += 1
+      }
+      var scratch = value
+      var bytes = [UInt8](repeating: 0, count: width)
+      // Low byte first into the end of the array, then shift, so the layout is big-endian.
+      for index in stride(from: width - 1, through: 0, by: -1) {
+        bytes[index] = UInt8(truncatingIfNeeded: scratch)  // lowest 8 bits
+        scratch >>= 8
+      }
+      // Set the width marker in the first byte: bit 7 for width 1, bit 6 for width 2, …
+      // (the value fit in 7w bits, so those high bits were still clear).
+      bytes[0] |= 0x80 >> (width - 1)
+      return bytes
+    }
+
+    /// Big-endian integer body for a UInt element. Unlike `vint` (used for IDs and
+    /// sizes), the payload has no width marker — the element's size field already
+    /// says how many bytes follow.
+    private static func unsigned(_ value: UInt64) -> Data {
+      if value == 0 { return Data([0x00]) }
+      var scratch = value
+      var bytes: [UInt8] = []
+      while scratch > 0 {
+        bytes.append(UInt8(truncatingIfNeeded: scratch))
+        scratch >>= 8
+      }
+      bytes.reverse()
+      return Data(bytes)
+    }
+
+    private static func float64(_ value: Double) -> Data {
+      let bits = value.bitPattern
+      var bytes: [UInt8] = []
+      bytes.reserveCapacity(8)
+      for shift in stride(from: 56, through: 0, by: -8) {
+        bytes.append(UInt8(truncatingIfNeeded: bits >> shift))
+      }
+      return Data(bytes)
+    }
+  }
+
   static func encode(_ timeline: Timeline) -> Data {
     var buffer = Buffer()
     buffer.master(ElementID.ebml) { header in
@@ -355,82 +478,5 @@ private enum EBML {
       }
     }
     return buffer.data
-  }
-
-  private struct Buffer {
-    var data = Data()
-
-    mutating func master(_ id: [UInt8], _ build: (inout Buffer) -> Void) {
-      var child = Buffer()
-      build(&child)
-      element(id, child.data)
-    }
-
-    mutating func uint(_ id: [UInt8], _ value: UInt64) {
-      element(id, Self.unsigned(value))
-    }
-
-    mutating func float(_ id: [UInt8], _ value: Double) {
-      element(id, Self.float64(value))
-    }
-
-    mutating func string(_ id: [UInt8], _ value: String) {
-      element(id, Data(value.utf8))
-    }
-
-    mutating func simpleBlock(_ block: Block) {
-      var body = Data()
-      body.append(contentsOf: Self.vint(block.slot.trackNumber))
-      let relative = UInt16(bitPattern: block.relativeTicks)
-      body.append(UInt8(relative >> 8))
-      body.append(UInt8(truncatingIfNeeded: relative))
-      body.append(SimpleBlockHeader.flags)
-      body.append(block.bytes)
-      element(ElementID.simpleBlock, body)
-    }
-
-    private mutating func element(_ id: [UInt8], _ body: Data) {
-      data.append(contentsOf: id)
-      data.append(contentsOf: Self.vint(UInt64(body.count)))
-      data.append(body)
-    }
-
-    /// The all-ones vint is reserved for an unknown size, so width w stops at 2^(7w) - 2.
-    private static func vint(_ value: UInt64) -> [UInt8] {
-      var width = 1
-      while value > (UInt64(1) << (7 * width)) - 2 {
-        width += 1
-      }
-      var scratch = value
-      var bytes = [UInt8](repeating: 0, count: width)
-      for index in stride(from: width - 1, through: 0, by: -1) {
-        bytes[index] = UInt8(truncatingIfNeeded: scratch)
-        scratch >>= 8
-      }
-      bytes[0] |= 0x80 >> (width - 1)
-      return bytes
-    }
-
-    private static func unsigned(_ value: UInt64) -> Data {
-      if value == 0 { return Data([0x00]) }
-      var scratch = value
-      var bytes: [UInt8] = []
-      while scratch > 0 {
-        bytes.append(UInt8(truncatingIfNeeded: scratch))
-        scratch >>= 8
-      }
-      bytes.reverse()
-      return Data(bytes)
-    }
-
-    private static func float64(_ value: Double) -> Data {
-      let bits = value.bitPattern
-      var bytes: [UInt8] = []
-      bytes.reserveCapacity(8)
-      for shift in stride(from: 56, through: 0, by: -8) {
-        bytes.append(UInt8(truncatingIfNeeded: bits >> shift))
-      }
-      return Data(bytes)
-    }
   }
 }
