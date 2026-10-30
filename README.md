@@ -57,7 +57,7 @@ Vocabulary is defined in [CONTEXT.md](CONTEXT.md); key decisions are tracked as 
 
 - Heuristics for labelling and pre-selecting titles (episodes, extras, "Play All").
 - How tracks are chosen.
-- Test fixtures for the demuxer and MKV writer.
+- Test fixtures for the demuxer.
 - Remembering discs between sessions.
 - Decryption ([#3](https://github.com/vjgarciag96/dividi/issues/3)).
 - Thumbnails and previews (for now: "Open in VLC").
