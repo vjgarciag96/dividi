@@ -65,3 +65,17 @@ private let threeSectors = Data((0..<3).flatMap { Array(repeating: UInt8($0), co
     try FolderSource(url: folder.videoTS).readSectors(2...3, of: "VIDEO_TS.IFO")
   }
 }
+
+@Test func countsTheWholeSectorsOfAFile() throws {
+  let folder = try TemporaryVideoTSFolder(files: ["VTS_01_1.VOB": threeSectors + Data([0])])
+
+  #expect(try FolderSource(url: folder.videoTS).sectorCount(of: "VTS_01_1.VOB") == 3)
+}
+
+@Test func countingSectorsOfAMissingFileFails() throws {
+  let folder = try TemporaryVideoTSFolder(files: [:])
+
+  #expect(throws: FolderSource.ReadError.fileNotFound("VTS_01_1.VOB")) {
+    try FolderSource(url: folder.videoTS).sectorCount(of: "VTS_01_1.VOB")
+  }
+}

@@ -23,16 +23,25 @@ public struct FolderSource: SectorSource {
   }
 
   public func readSectors(_ sectors: ClosedRange<Int>, of file: String) throws -> Data {
-    guard let url = Self.child(named: file, in: videoTS) else {
-      throw ReadError.fileNotFound(file)
-    }
-    let handle = try FileHandle(forReadingFrom: url)
+    let handle = try FileHandle(forReadingFrom: try url(of: file))
     defer { try? handle.close() }
     try handle.seek(toOffset: UInt64(sectors.lowerBound * Sector.size))
     let count = sectors.count * Sector.size
     let data = try handle.read(upToCount: count) ?? Data()
     guard data.count == count else { throw ReadError.pastEndOfFile(file) }
     return data
+  }
+
+  public func sectorCount(of file: String) throws -> Int {
+    let size = try url(of: file).resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+    return size / Sector.size
+  }
+
+  private func url(of file: String) throws -> URL {
+    guard let url = Self.child(named: file, in: videoTS) else {
+      throw ReadError.fileNotFound(file)
+    }
+    return url
   }
 
   private static func child(named name: String, in folder: URL) -> URL? {
