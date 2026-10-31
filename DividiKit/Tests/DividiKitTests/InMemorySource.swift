@@ -13,4 +13,9 @@ struct InMemorySource: SectorSource {
     let end = min((sectors.upperBound + 1) * Sector.size, data.count)
     return data.subdata(in: start..<end)
   }
+
+  func sectorCount(of file: String) throws -> Int {
+    guard let data = files[file] else { throw MissingFile() }
+    return data.count / Sector.size
+  }
 }
