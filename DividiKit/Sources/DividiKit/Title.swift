@@ -48,6 +48,14 @@ public struct AudioTrack: Equatable, Sendable {
   /// A raw 2-letter language code, e.g. `en`.
   public let language: String?
   public let kind: Kind
+  /// The sub-stream number (0–7) carrying the Track in the Title Set's VOBs.
+  public let substream: Int
+
+  /// The same Track, carried by another sub-stream.
+  func on(substream: Int) -> AudioTrack {
+    AudioTrack(
+      codec: codec, channels: channels, language: language, kind: kind, substream: substream)
+  }
 }
 
 /// One subtitle stream a Title offers.
