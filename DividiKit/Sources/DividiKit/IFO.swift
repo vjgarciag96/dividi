@@ -79,7 +79,7 @@ struct TitleSetIFO {
 
     var audioTracks: [AudioTrack] = []
     for index in 0..<min(try ifo.u16(at: 0x202), 8) {
-      audioTracks.append(try AudioTrack(ifo, at: 0x204 + 8 * index))
+      audioTracks.append(try AudioTrack(ifo, at: 0x204 + 8 * index, substream: index))
     }
     self.audioTracks = audioTracks
 
@@ -165,8 +165,9 @@ struct ProgramChain {
   /// The 1-based entry Cell of each program.
   let programs: [Int]
   let cells: [CellPlayback]
-  /// Whether each of the Title Set's audio streams is used by this chain.
-  let usesAudio: [Bool]
+  /// For each of the Title Set's audio streams, the sub-stream number carrying it in the VOBs,
+  /// or `nil` when this chain doesn't use it.
+  let audioSubstreams: [Int?]
   let usesSubtitles: [Bool]
 
   // Program chain (PGC). Offsets inside it are relative to its start:
@@ -174,7 +175,8 @@ struct ProgramChain {
   //   0x02  u8        number of programs
   //   0x03  u8        number of Cells
   //   0x04  4 bytes   playback time (see `ByteReader.playbackTime(at:)`)
-  //   0x0C  8 × 2     audio stream control: top bit set if the chain uses that stream
+  //   0x0C  8 × 2     audio stream control: top bit set if the chain uses that stream,
+  //                   bits 2–0 of the first byte its sub-stream number in the VOBs
   //   0x1C  32 × 4    subtitle stream control: top bit set if the chain uses that stream
   //   0xE6  u16       offset of the program map: each program's entry Cell, a u8 each
   //   0xE8  u16       offset of the Cell playback table: 24 bytes per Cell, in playback order
@@ -190,8 +192,9 @@ struct ProgramChain {
     let programCount = try ifo.u8(at: start + 0x02)
     let cellCount = try ifo.u8(at: start + 0x03)
     playbackTime = try ifo.playbackTime(at: start + 0x04)
-    usesAudio = try (0..<8).map { (index) throws(DiscError.Reason) in
-      try ifo.u8(at: start + 0x0C + 2 * index) & 0x80 != 0
+    audioSubstreams = try (0..<8).map { (index) throws(DiscError.Reason) in
+      let control = try ifo.u8(at: start + 0x0C + 2 * index)
+      return control & 0x80 != 0 ? control & 0x07 : nil
     }
     usesSubtitles = try (0..<32).map { (index) throws(DiscError.Reason) in
       try ifo.u8(at: start + 0x1C + 4 * index) & 0x80 != 0
@@ -229,7 +232,10 @@ extension AudioTrack {
   //   0x01  u8        bits 2–0 channel count minus 1
   //   0x02  2 bytes   language code, ASCII
   //   0x05  u8        kind (code extension)
-  init(_ ifo: ByteReader, at offset: Int) throws(DiscError.Reason) {
+  //
+  // Program chains say which sub-stream carries each stream; until then it's its position.
+  init(_ ifo: ByteReader, at offset: Int, substream: Int) throws(DiscError.Reason) {
+    self.substream = substream
     codec =
       switch try ifo.u8(at: offset) >> 5 {
       case 0: .ac3

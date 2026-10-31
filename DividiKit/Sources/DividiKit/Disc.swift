@@ -122,9 +122,9 @@ extension Title {
       Chapter(start: start, duration: end - start)
     }
     self.cells = cells.map { Cell(sectors: $0.sectors, duration: $0.playbackTime) }
-    audioTracks = titleSet.audioTracks.indices
-      .filter { stream in chains.contains { $0.usesAudio[stream] } }
-      .map { titleSet.audioTracks[$0] }
+    audioTracks = titleSet.audioTracks.enumerated().compactMap { stream, track in
+      chains.lazy.compactMap { $0.audioSubstreams[stream] }.first.map { track.on(substream: $0) }
+    }
     subtitleTracks = titleSet.subtitleTracks.indices
       .filter { stream in chains.contains { $0.usesSubtitles[stream] } }
       .map { titleSet.subtitleTracks[$0] }

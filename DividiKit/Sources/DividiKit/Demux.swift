@@ -1,7 +1,85 @@
 import Foundation
 
+/// Turns a Title's Sectors into the MKV writer's input.
+public enum Demuxer {
+  /// Demuxes a Title's MPEG-2 video and its first AC-3 Track, playing its Cells in order.
+  ///
+  /// Timestamps start at zero and run on across Cells, even where the Disc's own jump or reset:
+  /// each Cell starts where the one before ended. Navigation, subtitles and other audio Tracks
+  /// are left out.
+  public static func streams(of title: Title, from source: some SectorSource) throws -> (
+    video: MKV.Video, audio: MKV.Audio
+  ) {
+    if let reason = title.unsupportedReason { throw DemuxError.unsupportedTitle(reason) }
+    guard let track = title.audioTracks.first(where: { $0.codec == .ac3 }) else {
+      throw DemuxError.noAC3Track
+    }
+    let vobs = TitleSetVOBs(titleSet: title.titleSet, source: source)
+
+    var videoFormat: MPEG2Video.Format?
+    var audioFormat: AC3.Format?
+    var videoPackets: [MKV.Packet] = []
+    var audioPackets: [MKV.Packet] = []
+    var cellStart = 0
+    for cell in title.cells {
+      var packets: [PESPacket] = []
+      for first in stride(
+        from: cell.sectors.lowerBound, through: cell.sectors.upperBound, by: sectorsPerRead)
+      {
+        let sectors = first...min(first + sectorsPerRead - 1, cell.sectors.upperBound)
+        let data = try vobs.readSectors(sectors)
+        for pack in stride(from: 0, to: data.count, by: Sector.size) {
+          packets += try ProgramStream.packets(inPack: data.subdata(in: pack..<pack + Sector.size))
+        }
+      }
+      let video = try MPEG2Video.frames(in: packets.filter { $0.stream == .video })
+      let audio = AC3.frames(in: packets.filter { $0.stream == .ac3(track.substream) })
+      videoFormat = videoFormat ?? video.format
+      audioFormat = audioFormat ?? audio.format
+
+      // The Cell's own clock, from its earliest frame to the end of its latest.
+      let frames = video.frames + audio.frames
+      guard let first = frames.map(\.presentation).min(),
+        let end = frames.map({ $0.presentation + $0.duration }).max()
+      else { continue }
+      func packet(_ frame: CodedFrame) -> MKV.Packet {
+        MKV.Packet(
+          bytes: frame.bytes, presentation: duration(cellStart + frame.presentation - first),
+          duration: duration(frame.duration), isKeyframe: frame.isKeyframe)
+      }
+      videoPackets += video.frames.map(packet)
+      audioPackets += audio.frames.map(packet)
+      cellStart += end - first
+    }
+
+    guard let videoFormat else { throw DemuxError.missingSequenceHeader }
+    guard let audioFormat else { throw DemuxError.noAudioFrames }
+    return (
+      MKV.Video(
+        width: videoFormat.width, height: videoFormat.height,
+        displayAspect: videoFormat.displayAspect, packets: videoPackets),
+      MKV.Audio(
+        sampleRate: audioFormat.sampleRate, channels: audioFormat.channels, packets: audioPackets)
+    )
+  }
+
+  /// How many Sectors a Cell is read in at a time, so a whole Cell is never held twice.
+  private static let sectorsPerRead = 512
+
+  /// 90 kHz ticks as a `Duration`.
+  private static func duration(_ ticks: Int) -> Duration {
+    .microseconds(ticks * 100) / 9
+  }
+}
+
 /// Why a Title's Sectors couldn't be demuxed into video and audio packets.
 public enum DemuxError: Error, Equatable, Sendable {
+  /// The Title is an Unsupported Title.
+  case unsupportedTitle(UnsupportedReason)
+  /// The Title has no AC-3 audio Track.
+  case noAC3Track
+  /// The Title's AC-3 Track has no whole sync frames.
+  case noAudioFrames
   /// A Sector isn't a well-formed MPEG-2 program stream pack.
   case invalidPack
   /// The video has no sequence header, so its picture size is unknown.
