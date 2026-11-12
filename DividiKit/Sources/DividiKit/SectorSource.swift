@@ -7,4 +7,7 @@ import Foundation
 public protocol SectorSource: Sendable {
   /// Reads whole Sectors of a file in the `VIDEO_TS` folder, e.g. `VIDEO_TS.IFO`.
   func readSectors(_ sectors: ClosedRange<Int>, of file: String) throws -> Data
+
+  /// The number of whole Sectors in a file in the `VIDEO_TS` folder.
+  func sectorCount(of file: String) throws -> Int
 }

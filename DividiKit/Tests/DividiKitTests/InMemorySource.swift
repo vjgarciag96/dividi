@@ -1,16 +1,24 @@
 import DividiKit
 import Foundation
 
-/// A Source whose files live in memory.
+/// A Source whose files live in memory, failing the way `FolderSource` does.
 struct InMemorySource: SectorSource {
-  struct MissingFile: Error {}
-
   var files: [String: Data]
 
   func readSectors(_ sectors: ClosedRange<Int>, of file: String) throws -> Data {
-    guard let data = files[file] else { throw MissingFile() }
+    let data = try contents(of: file)
     let start = sectors.lowerBound * Sector.size
-    let end = min((sectors.upperBound + 1) * Sector.size, data.count)
+    let end = (sectors.upperBound + 1) * Sector.size
+    guard end <= data.count else { throw FolderSource.ReadError.pastEndOfFile(file) }
     return data.subdata(in: start..<end)
+  }
+
+  func sectorCount(of file: String) throws -> Int {
+    try contents(of: file).count / Sector.size
+  }
+
+  private func contents(of file: String) throws -> Data {
+    guard let data = files[file] else { throw FolderSource.ReadError.fileNotFound(file) }
+    return data
   }
 }

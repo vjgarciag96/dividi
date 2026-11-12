@@ -149,6 +149,9 @@ private func parse<IFO>(
     let header = try source.readSectors(0...0, of: file)
     // Every IFO header holds the IFO's own last Sector at 0x1C (u32).
     let lastSector = try ByteReader(header).u32(at: 0x1C)
+    guard lastSector < (try source.sectorCount(of: file)) else {
+      throw DiscError.Reason.truncated
+    }
     data = try source.readSectors(0...lastSector, of: file)
   } catch let reason as DiscError.Reason {
     throw DiscError(file: file, reason: reason)
