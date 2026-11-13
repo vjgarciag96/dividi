@@ -16,3 +16,6 @@ xcuserdata/
 *.VOB
 *.IFO
 *.BUP
+
+# Agent working notes
+/.work/
