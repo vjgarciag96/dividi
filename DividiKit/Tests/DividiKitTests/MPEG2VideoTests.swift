@@ -219,3 +219,53 @@ private typealias ES = TestMPEG2Video
     }
   }
 }
+
+@Test func realSoftTelecinedFilmIsTimedByTheFieldsEachFrameIsShownFor() throws {
+  try withTemporaryDirectory { directory in
+    let film = directory.appendingPathComponent("film.m2v")
+    try run(
+      "ffmpeg",
+      [
+        "-f", "lavfi", "-i", "testsrc2=size=720x480:rate=24000/1001", "-frames:v", "24",
+        "-c:v", "mpeg2video", "-b:v", "2M", "-maxrate", "2M", "-bufsize", "1835k", "-bf", "2",
+        "-g", "12", "-flags", "+cgop", "-sc_threshold", "1000000000", "-aspect", "16:9",
+        "-f", "mpeg2video", film.path,
+      ], in: directory)
+    let telecined = directory.appendingPathComponent("telecined.m2v")
+    try ES.softTelecine(Data(contentsOf: film)).write(to: telecined)
+    let vob = directory.appendingPathComponent("telecined.vob")
+    try run(
+      "ffmpeg",
+      [
+        "-i", telecined.path, "-c", "copy", "-muxpreload", "1", "-muxdelay", "1", "-f", "dvd",
+        vob.path,
+      ], in: directory)
+    let data = try Data(contentsOf: vob)
+    var packets: [PESPacket] = []
+    for start in stride(from: 0, to: data.count, by: Sector.size) {
+      packets += try ProgramStream.packets(inPack: data.subdata(in: start..<start + Sector.size))
+    }
+
+    let frames = try MPEG2Video.frames(in: packets).frames
+
+    // In display order: 3, 2, 3, 2 … fields at 1501.5 ticks each. ffmpeg rounds the stamps it
+    // writes, so a frame may start a tick away from the exact time.
+    let shown = frames.sorted { $0.presentation < $1.presentation }
+    let first = try #require(shown.first).presentation
+    let starts = shown.map { $0.presentation - first }
+    let exactStarts = [
+      0, 4_505, 7_508, 12_012, 15_015, 19_520, 22_523, 27_027, 30_030, 34_535, 37_538, 42_042,
+      45_045, 49_550, 52_553, 57_057, 60_060, 64_565, 67_568, 72_072, 75_075, 79_580, 82_583,
+      87_087,
+    ]
+    #expect(
+      starts.count == exactStarts.count
+        && zip(starts, exactStarts).allSatisfy { abs($0 - $1) <= 1 },
+      "each frame should start once the fields of the frames shown before it are over: \(starts)")
+    #expect(
+      shown.map(\.duration) == [
+        4_505, 3_003, 4_505, 3_003, 4_505, 3_003, 4_505, 3_003, 4_505, 3_003, 4_505, 3_003,
+        4_505, 3_003, 4_505, 3_003, 4_505, 3_003, 4_505, 3_003, 4_505, 3_003, 4_505, 3_003,
+      ], "frames should alternate between 3 and 2 fields")
+  }
+}

@@ -52,6 +52,50 @@ enum TestMPEG2Video {
   }
 }
 
+extension TestMPEG2Video {
+  /// Turns progressive 23.976 fps film into a 29.97 fps interlaced sequence by soft telecine, as
+  /// DVD authoring does: each picture is flagged to be shown for 3, 2, 3, 2 … fields in display
+  /// order, alternating which field comes first, without touching the coded pictures.
+  static func softTelecine(_ film: Data) -> Data {
+    var bytes = [UInt8](film)
+    var groupStart = 0
+    var groupLength = 0
+    var displayIndex = 0
+    var index = 0
+    while index + 8 < bytes.count {
+      guard bytes[index] == 0, bytes[index + 1] == 0, bytes[index + 2] == 1 else {
+        index += 1
+        continue
+      }
+      switch (bytes[index + 3], bytes[index + 4] >> 4) {
+      case (0xB3, _):  // sequence header: frame rate code 4, 29.97 fps
+        bytes[index + 7] = bytes[index + 7] & 0xF0 | 4
+      case (0xB8, _):  // group of pictures
+        groupStart += groupLength
+        groupLength = 0
+      case (0x00, _):  // picture header: temporal reference
+        let temporalReference = Int(bytes[index + 4]) << 2 | Int(bytes[index + 5] >> 6)
+        groupLength = max(groupLength, temporalReference + 1)
+        displayIndex = groupStart + temporalReference
+      case (0xB5, 1):  // sequence extension: not a progressive sequence
+        bytes[index + 5] &= ~0x08
+      case (0xB5, 8):  // picture coding extension: top field first, repeat first field
+        let (topFieldFirst, repeatFirstField) = [
+          (true, true), (false, false), (false, true), (true, false),
+        ][
+          displayIndex % 4]
+        bytes[index + 7] =
+          bytes[index + 7] & ~0x82 | (topFieldFirst ? 0x80 : 0) | (repeatFirstField ? 0x02 : 0)
+        bytes[index + 8] |= 0x80  // progressive frame
+      default:
+        break
+      }
+      index += 3
+    }
+    return Data(bytes)
+  }
+}
+
 extension PESPacket {
   static func video(_ payload: Data, presentation: Int? = nil) -> PESPacket {
     PESPacket(stream: .video, presentation: presentation, decoding: nil, payload: payload)
