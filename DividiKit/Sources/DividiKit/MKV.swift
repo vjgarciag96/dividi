@@ -76,10 +76,46 @@ public enum MKV: Sendable {
     }
   }
 
+  /// What a video track's TrackEntry says about its pictures.
+  public struct VideoFormat: Equatable, Sendable {
+    /// Coded width, in pixels.
+    public let width: Int
+    /// Coded height, in pixels.
+    public let height: Int
+    public let displayAspect: Video.DisplayAspect
+
+    public init(width: Int, height: Int, displayAspect: Video.DisplayAspect) {
+      self.width = width
+      self.height = height
+      self.displayAspect = displayAspect
+    }
+  }
+
+  /// What an audio track's TrackEntry says about its sound.
+  public struct AudioFormat: Equatable, Sendable {
+    public let sampleRate: Int
+    /// Number of audio channels, e.g. 2 for stereo.
+    public let channels: Int
+
+    public init(sampleRate: Int, channels: Int) {
+      self.sampleRate = sampleRate
+      self.channels = channels
+    }
+  }
+
   /// Remuxes one video stream and one audio stream into MKV bytes.
-  public static func data(video: Video, audio: Audio) throws(MKVError) -> Data {
-    let timeline = try Timeline.make(video: video, audio: audio)
-    return EBML.encode(timeline)
+  public static func data(video: Video, audio: Audio) throws -> Data {
+    var writer = try Writer(
+      output: DataOutput(),
+      video: VideoFormat(
+        width: video.width, height: video.height, displayAspect: video.displayAspect),
+      audio: AudioFormat(sampleRate: audio.sampleRate, channels: audio.channels))
+    guard !video.packets.isEmpty else { throw MKVError.emptyPackets(.video) }
+    guard !audio.packets.isEmpty else { throw MKVError.emptyPackets(.audio) }
+    for packet in video.packets { try writer.append(packet, to: .video) }
+    for packet in audio.packets { try writer.append(packet, to: .audio) }
+    try writer.finish()
+    return writer.output.data
   }
 }
 
@@ -174,144 +210,223 @@ private enum Container {
   static let writerName = "dividi"
 }
 
-/// A Matroska Cluster: a run of frames that share one base timestamp; each
-/// block stores its time as an offset from that base.
-private struct Cluster {
-  var timestampTicks: UInt64
-  var blocks: [Block]
+/// Where a Writer puts the MKV's bytes.
+protocol MKVOutput {
+  /// How many bytes have been written so far.
+  var count: Int { get }
+  mutating func append(_ bytes: Data) throws
+  /// Writes over bytes already written, at `offset` from the start.
+  mutating func overwrite(_ bytes: Data, at offset: Int) throws
 }
 
-private struct Block {
-  var stream: MKVError.Stream
-  var relativeTicks: Int16
-  var bytes: Data
-  var isKeyframe: Bool
+/// An MKV held in memory.
+struct DataOutput: MKVOutput {
+  private(set) var data = Data()
+
+  var count: Int { data.count }
+
+  mutating func append(_ bytes: Data) {
+    data.append(bytes)
+  }
+
+  mutating func overwrite(_ bytes: Data, at offset: Int) {
+    data.replaceSubrange(offset..<offset + bytes.count, with: bytes)
+  }
 }
 
-private struct Timeline {
-  var width: Int
-  var height: Int
-  var displayAspect: MKV.Video.DisplayAspect
-  var sampleRate: Int
-  var channels: Int
-  var clusters: [Cluster]
-  /// End of the longest track, in Matroska ticks (milliseconds at `TimestampScale`).
-  var durationTicks: UInt64
+/// An MKV written to a file as it goes, starting at the handle's current end.
+///
+/// Write errors name `file` rather than whatever the handle is open on, such as a temporary
+/// file that only becomes `file` once complete.
+struct FileOutput: MKVOutput {
+  let handle: FileHandle
+  let file: URL
+  private(set) var count = 0
 
-  private struct Pending {
-    var stream: MKVError.Stream
-    var tick: UInt64
-    var bytes: Data
-    var endTick: UInt64
-    var isKeyframe: Bool
+  init(_ handle: FileHandle, file: URL) {
+    self.handle = handle
+    self.file = file
   }
 
-  static func make(video: MKV.Video, audio: MKV.Audio) throws(MKVError) -> Timeline {
-    guard video.width > 0 else { throw .nonPositive(.width) }
-    guard video.height > 0 else { throw .nonPositive(.height) }
-    guard audio.sampleRate > 0 else { throw .nonPositive(.sampleRate) }
-    guard audio.channels > 0 else { throw .nonPositive(.channels) }
-    guard !video.packets.isEmpty else { throw .emptyPackets(.video) }
-    guard !audio.packets.isEmpty else { throw .emptyPackets(.audio) }
-
-    let videoPackets = try timed(video.packets, stream: .video)
-    let audioPackets = try timed(audio.packets, stream: .audio)
-    let merged = merge(video: videoPackets, audio: audioPackets)
-    return Timeline(
-      width: video.width,
-      height: video.height,
-      displayAspect: video.displayAspect,
-      sampleRate: audio.sampleRate,
-      channels: audio.channels,
-      clusters: clusters(merged),
-      durationTicks: merged.reduce(0) { max($0, $1.endTick) })
+  mutating func append(_ bytes: Data) throws {
+    try naming(file) { try handle.write(contentsOf: bytes) }
+    count += bytes.count
   }
 
-  private static func timed(
-    _ packets: [MKV.Packet], stream: MKVError.Stream
-  ) throws(MKVError) -> [Pending] {
-    var pending: [Pending] = []
-    pending.reserveCapacity(packets.count)
-    for packet in packets {
-      if packet.presentation < .zero {
-        throw .negativePresentation(stream)
-      }
-      guard packet.duration > .zero else { throw .nonPositiveDuration(stream) }
-      pending.append(
+  func overwrite(_ bytes: Data, at offset: Int) throws {
+    try naming(file) {
+      try handle.seek(toOffset: UInt64(offset))
+      try handle.write(contentsOf: bytes)
+      try handle.seekToEnd()
+    }
+  }
+}
+
+/// Runs `body`, reporting a file system error it throws as being about `file`.
+func naming<T>(_ file: URL, _ body: () throws -> T) throws -> T {
+  do {
+    return try body()
+  } catch let error as CocoaError {
+    throw CocoaError(error.code, userInfo: [NSURLErrorKey: file])
+  }
+}
+
+extension MKV {
+  /// Writes one Extraction's MKV a Cluster at a time, as its packets arrive.
+  ///
+  /// Each track's packets arrive in decode order. The Writer holds them only until the other
+  /// track has caught up, then interleaves the two by presentation time, video first on a tie.
+  /// The Segment size and the Duration aren't known until the last packet, so `finish()` writes
+  /// them over placeholders.
+  struct Writer<Output: MKVOutput> {
+    private(set) var output: Output
+    /// Where the Segment's 8-byte size goes, and where the Segment's body starts after it.
+    private let segmentSize: Int
+    /// Where the Info's 8-byte Duration goes.
+    private let durationAt: Int
+    private var queues: [MKVError.Stream: Queue<Pending>] = [.video: Queue(), .audio: Queue()]
+    private var appended: Set<MKVError.Stream> = []
+    /// The Cluster being filled, until a block falls outside its timestamp range.
+    private var cluster: (timestampTicks: UInt64, body: EBML.Buffer)?
+    /// End of the longest track so far, in Matroska ticks.
+    private var durationTicks: UInt64 = 0
+
+    private struct Pending {
+      var stream: MKVError.Stream
+      var tick: UInt64
+      var bytes: Data
+      var endTick: UInt64
+      var isKeyframe: Bool
+    }
+
+    /// Writes the EBML header, the start of the Segment, the Info and the Tracks.
+    init(output: Output, video: VideoFormat, audio: AudioFormat) throws {
+      guard video.width > 0 else { throw MKVError.nonPositive(.width) }
+      guard video.height > 0 else { throw MKVError.nonPositive(.height) }
+      guard audio.sampleRate > 0 else { throw MKVError.nonPositive(.sampleRate) }
+      guard audio.channels > 0 else { throw MKVError.nonPositive(.channels) }
+      self.output = output
+
+      var head = EBML.Buffer()
+      head.header()
+      head.unknownSizeMaster(ElementID.segment)
+      segmentSize = output.count + head.data.count - EBML.sizeWidth
+      var durationInHead = 0
+      head.info { durationInHead = $0 }
+      durationAt = output.count + durationInHead
+      head.tracks(video: video, audio: audio)
+      try self.output.append(head.data)
+    }
+
+    /// Takes the next packet of one track, in that track's decode order.
+    mutating func append(_ packet: Packet, to stream: MKVError.Stream) throws {
+      guard packet.presentation >= .zero else { throw MKVError.negativePresentation(stream) }
+      guard packet.duration > .zero else { throw MKVError.nonPositiveDuration(stream) }
+      queues[stream]!.push(
         Pending(
-          stream: stream,
-          tick: ticks(packet.presentation),
-          bytes: packet.bytes,
+          stream: stream, tick: ticks(packet.presentation), bytes: packet.bytes,
           endTick: ticks(packet.presentation + packet.duration),
           isKeyframe: stream == .audio || packet.isKeyframe))
+      appended.insert(stream)
+      try interleave(untilEmpty: false)
     }
-    return pending
-  }
 
-  private static func ticks(_ presentation: Duration) -> UInt64 {
-    let (seconds, attoseconds) = presentation.components
-    // One millisecond is 10^15 attoseconds; convert the fractional second that way.
-    let attosecondsPerMillisecond: Int64 = 1_000_000_000_000_000
-    let whole = UInt64(seconds) * 1_000
-    let fraction = attoseconds / attosecondsPerMillisecond
-    var ticks = whole + UInt64(fraction)
-    // Round half-up so 0.5 ms and above become the next tick.
-    if attoseconds % attosecondsPerMillisecond >= attosecondsPerMillisecond / 2 {
-      ticks += 1
+    /// Writes whatever is held back, then the Segment size and the Duration.
+    mutating func finish() throws {
+      guard appended.contains(.video) else { throw MKVError.emptyPackets(.video) }
+      guard appended.contains(.audio) else { throw MKVError.emptyPackets(.audio) }
+      try interleave(untilEmpty: true)
+      try closeCluster()
+      try output.overwrite(EBML.float64(Double(durationTicks)), at: durationAt)
+      try output.overwrite(
+        EBML.size(UInt64(output.count - segmentSize - EBML.sizeWidth)), at: segmentSize)
     }
-    return ticks
-  }
 
-  private static func merge(video: [Pending], audio: [Pending]) -> [Pending] {
-    var merged: [Pending] = []
-    merged.reserveCapacity(video.count + audio.count)
-    var videoIndex = 0
-    var audioIndex = 0
-    while videoIndex < video.count && audioIndex < audio.count {
-      if video[videoIndex].tick <= audio[audioIndex].tick {
-        merged.append(video[videoIndex])
-        videoIndex += 1
-      } else {
-        merged.append(audio[audioIndex])
-        audioIndex += 1
+    /// Writes the earliest of the two tracks' next packets while both have one, or every held
+    /// packet when the tracks have ended.
+    private mutating func interleave(untilEmpty: Bool) throws {
+      while true {
+        let next: MKVError.Stream
+        switch (queues[.video]!.first, queues[.audio]!.first) {
+        case (let video?, let audio?): next = video.tick <= audio.tick ? .video : .audio
+        case (.some, nil) where untilEmpty: next = .video
+        case (nil, .some) where untilEmpty: next = .audio
+        default: return
+        }
+        try write(queues[next]!.pop())
       }
     }
-    merged.append(contentsOf: video.suffix(from: videoIndex))
-    merged.append(contentsOf: audio.suffix(from: audioIndex))
-    return merged
-  }
 
-  private static func clusters(_ packets: [Pending]) -> [Cluster] {
-    var clusters: [Cluster] = []
-    var timestamp = packets[0].tick
-    var blocks: [Block] = []
-    for packet in packets {
-      // A block can only store an Int16 offset from the cluster timestamp. When a
-      // packet falls outside that range (common once the timeline grows past ~33 s,
-      // or when B-frames sit behind a new cluster base), close the current cluster
-      // and start a new one whose base is this packet's tick.
-      let outsideCluster =
-        packet.tick >= timestamp
-        ? packet.tick - timestamp > TimestampScale.maxForwardRelativeTick
-        : timestamp - packet.tick > TimestampScale.maxBackwardRelativeTick
-      if outsideCluster {
-        clusters.append(Cluster(timestampTicks: timestamp, blocks: blocks))
-        timestamp = packet.tick
-        blocks = []
+    private mutating func write(_ packet: Pending) throws {
+      durationTicks = max(durationTicks, packet.endTick)
+      // A block can only store an Int16 offset from the cluster timestamp. When a packet falls
+      // outside that range (common once the timeline grows past ~33 s, or when B-frames sit
+      // behind a new cluster base), close the current cluster and start a new one whose base is
+      // this packet's tick.
+      if let cluster {
+        let outsideCluster =
+          packet.tick >= cluster.timestampTicks
+          ? packet.tick - cluster.timestampTicks > TimestampScale.maxForwardRelativeTick
+          : cluster.timestampTicks - packet.tick > TimestampScale.maxBackwardRelativeTick
+        if outsideCluster { try closeCluster() }
       }
+      if cluster == nil {
+        var body = EBML.Buffer()
+        body.uint(ElementID.timestamp, packet.tick)
+        cluster = (packet.tick, body)
+      }
+      let base = cluster!.timestampTicks
       let relative =
-        packet.tick >= timestamp
-        ? Int64(packet.tick - timestamp)
-        : -Int64(timestamp - packet.tick)
-      blocks.append(
-        Block(
-          stream: packet.stream,
-          relativeTicks: Int16(relative),
-          bytes: packet.bytes,
-          isKeyframe: packet.isKeyframe))
+        packet.tick >= base ? Int64(packet.tick - base) : -Int64(base - packet.tick)
+      cluster!.body.simpleBlock(
+        track: packet.stream.trackNumber, relativeTicks: Int16(relative), bytes: packet.bytes,
+        isKeyframe: packet.isKeyframe)
     }
-    clusters.append(Cluster(timestampTicks: timestamp, blocks: blocks))
-    return clusters
+
+    private mutating func closeCluster() throws {
+      guard let cluster else { return }
+      var element = EBML.Buffer()
+      element.element(ElementID.cluster, cluster.body.data)
+      try output.append(element.data)
+      self.cluster = nil
+    }
+
+    private func ticks(_ presentation: Duration) -> UInt64 {
+      let (seconds, attoseconds) = presentation.components
+      // One millisecond is 10^15 attoseconds; convert the fractional second that way.
+      let attosecondsPerMillisecond: Int64 = 1_000_000_000_000_000
+      let whole = UInt64(seconds) * 1_000
+      let fraction = attoseconds / attosecondsPerMillisecond
+      var ticks = whole + UInt64(fraction)
+      // Round half-up so 0.5 ms and above become the next tick.
+      if attoseconds % attosecondsPerMillisecond >= attosecondsPerMillisecond / 2 {
+        ticks += 1
+      }
+      return ticks
+    }
+  }
+}
+
+/// A first-in, first-out queue that pops without moving what's behind.
+private struct Queue<Element> {
+  private var elements: [Element] = []
+  private var head = 0
+
+  var first: Element? { head < elements.count ? elements[head] : nil }
+
+  mutating func push(_ element: Element) {
+    elements.append(element)
+  }
+
+  mutating func pop() -> Element {
+    defer {
+      head += 1
+      if head == elements.count {
+        elements.removeAll(keepingCapacity: true)
+        head = 0
+      }
+    }
+    return elements[head]
   }
 }
 
@@ -352,13 +467,37 @@ private enum ElementID {
 }
 
 private enum EBML {
-  private struct Buffer {
+  /// How many bytes a size written over later takes: one marker byte, then 7 value bytes.
+  static let sizeWidth = 8
+
+  /// An element size `sizeWidth` bytes wide, whatever its value, so it can be written over a
+  /// placeholder.
+  static func size(_ value: UInt64) -> Data {
+    var bytes = [UInt8](repeating: 0, count: sizeWidth)
+    var scratch = value
+    for index in stride(from: sizeWidth - 1, through: 1, by: -1) {
+      bytes[index] = UInt8(truncatingIfNeeded: scratch)
+      scratch >>= 8
+    }
+    bytes[0] = 0x01
+    return Data(bytes)
+  }
+
+  struct Buffer {
     var data = Data()
 
     mutating func master(_ id: [UInt8], _ build: (inout Buffer) -> Void) {
       var child = Buffer()
       build(&child)
       element(id, child.data)
+    }
+
+    /// Starts a master element whose size is written over later, with `EBML.size`.
+    mutating func unknownSizeMaster(_ id: [UInt8]) {
+      data.append(contentsOf: id)
+      // All ones means an unknown size, which a player still accepts if the size is never
+      // written over.
+      data.append(contentsOf: [0x01] + [UInt8](repeating: 0xFF, count: EBML.sizeWidth - 1))
     }
 
     mutating func uint(_ id: [UInt8], _ value: UInt64) {
@@ -373,19 +512,62 @@ private enum EBML {
       element(id, Data(value.utf8))
     }
 
-    mutating func simpleBlock(_ block: Block) {
+    mutating func simpleBlock(track: UInt64, relativeTicks: Int16, bytes: Data, isKeyframe: Bool) {
       var body = Data()
-      body.append(contentsOf: Self.vint(block.stream.trackNumber))
-      let relative = UInt16(bitPattern: block.relativeTicks)
+      body.append(contentsOf: Self.vint(track))
+      let relative = UInt16(bitPattern: relativeTicks)
       body.append(UInt8(relative >> 8))
       body.append(UInt8(truncatingIfNeeded: relative))
-      body.append(block.isKeyframe ? 0x80 : 0)
-      body.append(block.bytes)
+      body.append(isKeyframe ? 0x80 : 0)
+      body.append(bytes)
       element(ElementID.simpleBlock, body)
     }
 
+    /// The EBML header, saying the file is Matroska.
+    mutating func header() {
+      master(ElementID.ebml) { header in
+        header.uint(ElementID.ebmlVersion, 1)
+        header.uint(ElementID.ebmlReadVersion, 1)
+        header.uint(ElementID.ebmlMaxIDLength, 4)
+        header.uint(ElementID.ebmlMaxSizeLength, 8)
+        header.string(ElementID.docType, Container.docType)
+        header.uint(ElementID.docTypeVersion, Container.docTypeVersion)
+        header.uint(ElementID.docTypeReadVersion, Container.docTypeReadVersion)
+      }
+    }
+
+    /// The Info, with a Duration of 0 to write over; `durationAt` gets where its 8 bytes are.
+    mutating func info(durationAt: (Int) -> Void) {
+      var body = Buffer()
+      body.uint(ElementID.timestampScale, TimestampScale.nanoseconds)
+      body.float(ElementID.duration, 0)
+      let durationInBody = body.data.count - 8
+      body.string(ElementID.muxingApp, Container.writerName)
+      body.string(ElementID.writingApp, Container.writerName)
+      let bodyStart = element(ElementID.info, body.data)
+      durationAt(bodyStart + durationInBody)
+    }
+
+    /// The Tracks: video as track 1, audio as track 2.
+    mutating func tracks(video: MKV.VideoFormat, audio: MKV.AudioFormat) {
+      master(ElementID.tracks) { tracks in
+        tracks.trackEntry(.video) { settings in
+          settings.uint(ElementID.pixelWidth, UInt64(video.width))
+          settings.uint(ElementID.pixelHeight, UInt64(video.height))
+          let ratio = video.displayAspect.ratio
+          settings.uint(ElementID.displayWidth, UInt64(ratio.width))
+          settings.uint(ElementID.displayHeight, UInt64(ratio.height))
+          settings.uint(ElementID.displayUnit, Container.displayUnitAspectRatio)
+        }
+        tracks.trackEntry(.audio) { settings in
+          settings.float(ElementID.samplingFrequency, Double(audio.sampleRate))
+          settings.uint(ElementID.channels, UInt64(audio.channels))
+        }
+      }
+    }
+
     /// A TrackEntry for one stream; `settings` fills its Video or Audio element.
-    mutating func trackEntry(_ stream: MKVError.Stream, settings: (inout Buffer) -> Void) {
+    private mutating func trackEntry(_ stream: MKVError.Stream, settings: (inout Buffer) -> Void) {
       master(ElementID.trackEntry) { entry in
         entry.uint(ElementID.trackNumber, stream.trackNumber)
         entry.uint(ElementID.trackUID, stream.trackNumber)
@@ -396,16 +578,19 @@ private enum EBML {
       }
     }
 
-    private mutating func element(_ id: [UInt8], _ body: Data) {
+    /// Appends an element and returns where its body starts.
+    @discardableResult mutating func element(_ id: [UInt8], _ body: Data) -> Int {
       data.append(contentsOf: id)
       data.append(contentsOf: Self.vint(UInt64(body.count)))
+      let bodyStart = data.count
       data.append(body)
+      return bodyStart
     }
 
     /// Encodes an EBML variable-length integer: the leading byte's high bits mark
     /// the width, and the remaining bits hold the value. All-ones is reserved for
     /// an unknown size, so width `w` stops at `2^(7w) - 2`.
-    private static func vint(_ value: UInt64) -> [UInt8] {
+    static func vint(_ value: UInt64) -> [UInt8] {
       var width = 1
       // Width marker sits in the first byte (w-1 zeros, then a 1); remaining bits are
       // the value. With n = 7w value bits you get 2^n patterns (0 through 2^n-1); the
@@ -442,7 +627,7 @@ private enum EBML {
       return Data(bytes)
     }
 
-    private static func float64(_ value: Double) -> Data {
+    static func float64(_ value: Double) -> Data {
       let bits = value.bitPattern
       var bytes: [UInt8] = []
       bytes.reserveCapacity(8)
@@ -453,47 +638,7 @@ private enum EBML {
     }
   }
 
-  static func encode(_ timeline: Timeline) -> Data {
-    var buffer = Buffer()
-    buffer.master(ElementID.ebml) { header in
-      header.uint(ElementID.ebmlVersion, 1)
-      header.uint(ElementID.ebmlReadVersion, 1)
-      header.uint(ElementID.ebmlMaxIDLength, 4)
-      header.uint(ElementID.ebmlMaxSizeLength, 8)
-      header.string(ElementID.docType, Container.docType)
-      header.uint(ElementID.docTypeVersion, Container.docTypeVersion)
-      header.uint(ElementID.docTypeReadVersion, Container.docTypeReadVersion)
-    }
-    buffer.master(ElementID.segment) { segment in
-      segment.master(ElementID.info) { info in
-        info.uint(ElementID.timestampScale, TimestampScale.nanoseconds)
-        info.float(ElementID.duration, Double(timeline.durationTicks))
-        info.string(ElementID.muxingApp, Container.writerName)
-        info.string(ElementID.writingApp, Container.writerName)
-      }
-      segment.master(ElementID.tracks) { tracks in
-        tracks.trackEntry(.video) { video in
-          video.uint(ElementID.pixelWidth, UInt64(timeline.width))
-          video.uint(ElementID.pixelHeight, UInt64(timeline.height))
-          let ratio = timeline.displayAspect.ratio
-          video.uint(ElementID.displayWidth, UInt64(ratio.width))
-          video.uint(ElementID.displayHeight, UInt64(ratio.height))
-          video.uint(ElementID.displayUnit, Container.displayUnitAspectRatio)
-        }
-        tracks.trackEntry(.audio) { audio in
-          audio.float(ElementID.samplingFrequency, Double(timeline.sampleRate))
-          audio.uint(ElementID.channels, UInt64(timeline.channels))
-        }
-      }
-      for cluster in timeline.clusters {
-        segment.master(ElementID.cluster) { body in
-          body.uint(ElementID.timestamp, cluster.timestampTicks)
-          for block in cluster.blocks {
-            body.simpleBlock(block)
-          }
-        }
-      }
-    }
-    return buffer.data
+  static func float64(_ value: Double) -> Data {
+    Buffer.float64(value)
   }
 }
