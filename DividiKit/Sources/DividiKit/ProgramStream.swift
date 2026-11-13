@@ -34,8 +34,12 @@ enum ProgramStream {
   //   0x03  u8        stream id
   //   0x04  u16       length of the rest of the packet
   //
+  // A program end code, 00 00 01 B9 with no length, may close the last pack of a stream.
+  //
   // Stream ids: BB system header, BE padding, BF private stream 2 (navigation),
   // BD private stream 1 (AC-3, DTS, LPCM, subtitles), C0–C7 MPEG audio, E0 MPEG video.
+
+  private static let programEndCode: [UInt8] = [0x00, 0x00, 0x01, 0xB9]
 
   /// Splits one pack into the PES packets of the streams dividi demuxes, skipping navigation,
   /// padding and every other stream.
@@ -47,6 +51,7 @@ enum ProgramStream {
     var packets: [PESPacket] = []
     var offset = 14 + Int(bytes[13] & 0x07)
     while offset < bytes.count {
+      if bytes[offset...].starts(with: programEndCode) { break }
       guard offset + 6 <= bytes.count, bytes[offset..<offset + 3] == [0x00, 0x00, 0x01]
       else { throw .invalidPack }
       let end = offset + 6 + (Int(bytes[offset + 4]) << 8 | Int(bytes[offset + 5]))

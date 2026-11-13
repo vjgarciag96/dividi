@@ -5,12 +5,18 @@ import Foundation
 /// MPEG-2 Systems and DVD-Video specify, without sharing any code with the demuxer.
 enum TestPack {
   /// A pack holding the PES packets, padded to a whole Sector.
-  static func pack(_ packets: [TestPES]) -> Data {
-    var pack = header()
+  ///
+  /// `stuffing` bytes (0–7) follow the pack header; `endsProgram` puts a program end code in
+  /// place of the padding packet's last 4 bytes.
+  static func pack(_ packets: [TestPES], stuffing: Int = 0, endsProgram: Bool = false) -> Data {
+    var pack = header(stuffing: stuffing)
     for packet in packets { pack += packet.bytes() }
-    precondition(pack.count + 6 <= Sector.size, "the PES packets don't fit in one pack")
-    pack += pes(streamID: 0xBE, header: [], payload: Data(count: Sector.size - pack.count - 6))
-    return pack
+    let endCode = endsProgram ? Data([0x00, 0x00, 0x01, 0xB9]) : Data()
+    precondition(pack.count + 6 + endCode.count <= Sector.size, "the PES packets don't fit")
+    pack += pes(
+      streamID: 0xBE, header: [], payload: Data(count: Sector.size - pack.count - 6 - endCode.count)
+    )
+    return pack + endCode
   }
 
   /// A navigation pack: a system header, then the PCI and DSI private stream 2 packets.
@@ -23,11 +29,12 @@ enum TestPack {
     return pack
   }
 
-  private static func header() -> Data {
+  private static func header(stuffing: Int = 0) -> Data {
     var header = Data([0x00, 0x00, 0x01, 0xBA])  // pack start code
     header += [0x44, 0x00, 0x04, 0x00, 0x04, 0x01]  // '01' marker, SCR 0
     header += [0x01, 0x89, 0xC3]  // mux rate
-    header += [0xF8]  // reserved | no stuffing
+    header += [0xF8 | UInt8(stuffing)]  // reserved | stuffing length
+    header += Data(repeating: 0xFF, count: stuffing)
     return header
   }
 }

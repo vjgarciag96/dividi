@@ -44,6 +44,24 @@ import Testing
     ])
 }
 
+@Test func packetsFollowThePackHeadersStuffing() throws {
+  let pack = TestPack.pack([TestPES(streamID: 0xE0, payload: Data([4, 5]))], stuffing: 3)
+
+  #expect(
+    try ProgramStream.packets(inPack: pack) == [
+      PESPacket(stream: .video, presentation: nil, decoding: nil, payload: Data([4, 5]))
+    ])
+}
+
+@Test func programEndCodeEndsThePack() throws {
+  let pack = TestPack.pack([TestPES(streamID: 0xE0, payload: Data([4, 5]))], endsProgram: true)
+
+  #expect(
+    try ProgramStream.packets(inPack: pack) == [
+      PESPacket(stream: .video, presentation: nil, decoding: nil, payload: Data([4, 5]))
+    ])
+}
+
 @Test func navigationPacksHaveNoPackets() throws {
   #expect(try ProgramStream.packets(inPack: TestPack.navigation()) == [])
 }
