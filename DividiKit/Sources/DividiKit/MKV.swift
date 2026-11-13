@@ -276,18 +276,27 @@ extension MKV {
   ///
   /// Each track's packets arrive in decode order. The Writer holds them only until the other
   /// track has caught up, then interleaves the two by presentation time, video first on a tie.
-  /// The Segment size and the Duration aren't known until the last packet, so `finish()` writes
-  /// them over placeholders.
+  /// Each video keyframe starts a Cluster, so a player can seek to it through the Cues written
+  /// after the last Cluster. The Segment size, the Duration and where the Cues are aren't known
+  /// until the last packet, so `finish()` writes them over placeholders.
   struct Writer<Output: MKVOutput> {
     private(set) var output: Output
     /// Where the Segment's 8-byte size goes, and where the Segment's body starts after it.
     private let segmentSize: Int
+    /// Where the Segment's body starts; positions inside the Segment count from here.
+    private let segmentStart: Int
     /// Where the Info's 8-byte Duration goes.
     private let durationAt: Int
+    /// Where the SeekHead's entry for the Cues starts, and where its 8-byte position goes.
+    private let cuesSeek: (start: Int, positionAt: Int)
+    /// Each Cluster that starts with a video keyframe: the keyframe's tick and the Cluster's
+    /// position in the Segment.
+    private var cues: [(tick: UInt64, position: Int)] = []
     private var queues: [MKVError.Stream: Queue<Pending>] = [.video: Queue(), .audio: Queue()]
     private var appended: Set<MKVError.Stream> = []
-    /// The Cluster being filled, until a block falls outside its timestamp range.
-    private var cluster: (timestampTicks: UInt64, body: EBML.Buffer)?
+    /// The Cluster being filled, until the next video keyframe or a block outside its timestamp
+    /// range; `isCued` when it starts with a video keyframe.
+    private var cluster: (timestampTicks: UInt64, body: EBML.Buffer, isCued: Bool)?
     /// End of the longest track so far, in Matroska ticks.
     private var durationTicks: UInt64 = 0
 
@@ -299,7 +308,7 @@ extension MKV {
       var isKeyframe: Bool
     }
 
-    /// Writes the EBML header, the start of the Segment, the Info and the Tracks.
+    /// Writes the EBML header, the start of the Segment, the SeekHead, the Info and the Tracks.
     init(output: Output, video: VideoFormat, audio: AudioFormat) throws {
       guard video.width > 0 else { throw MKVError.nonPositive(.width) }
       guard video.height > 0 else { throw MKVError.nonPositive(.height) }
@@ -311,10 +320,20 @@ extension MKV {
       head.header()
       head.unknownSizeMaster(ElementID.segment)
       segmentSize = output.count + head.data.count - EBML.sizeWidth
-      var durationInHead = 0
-      head.info { durationInHead = $0 }
-      durationAt = output.count + durationInHead
-      head.tracks(video: video, audio: audio)
+      segmentStart = output.count + head.data.count
+
+      var info = EBML.Buffer()
+      var durationInInfo = 0
+      info.info { durationInInfo = $0 }
+      var tracks = EBML.Buffer()
+      tracks.tracks(video: video, audio: audio)
+      // The SeekHead's positions are written 8 bytes wide, so its size doesn't depend on them.
+      let seekHeadSize = EBML.Buffer.seekHead(info: 0, tracks: 0).buffer.data.count
+      let seekHead = EBML.Buffer.seekHead(
+        info: seekHeadSize, tracks: seekHeadSize + info.data.count)
+      cuesSeek = (segmentStart + seekHead.cues.start, segmentStart + seekHead.cues.positionAt)
+      durationAt = segmentStart + seekHeadSize + durationInInfo
+      head.data += seekHead.buffer.data + info.data + tracks.data
       try self.output.append(head.data)
     }
 
@@ -331,12 +350,24 @@ extension MKV {
       try interleave(untilEmpty: false)
     }
 
-    /// Writes whatever is held back, then the Segment size and the Duration.
+    /// Writes whatever is held back and the Cues, then the Segment size and the Duration.
     mutating func finish() throws {
       guard appended.contains(.video) else { throw MKVError.emptyPackets(.video) }
       guard appended.contains(.audio) else { throw MKVError.emptyPackets(.audio) }
       try interleave(untilEmpty: true)
       try closeCluster()
+      if cues.isEmpty {
+        // Cues need a CuePoint, so with no video keyframe there are none, and the SeekHead's
+        // entry for them becomes padding.
+        try output.overwrite(
+          EBML.void(size: cuesSeek.positionAt + 8 - cuesSeek.start), at: cuesSeek.start)
+      } else {
+        try output.overwrite(
+          EBML.fixedUnsigned(UInt64(output.count - segmentStart)), at: cuesSeek.positionAt)
+        var element = EBML.Buffer()
+        element.cues(cues, track: MKVError.Stream.video.trackNumber)
+        try output.append(element.data)
+      }
       try output.overwrite(EBML.float64(Double(durationTicks)), at: durationAt)
       try output.overwrite(
         EBML.size(UInt64(output.count - segmentSize - EBML.sizeWidth)), at: segmentSize)
@@ -363,17 +394,19 @@ extension MKV {
       // outside that range (common once the timeline grows past ~33 s, or when B-frames sit
       // behind a new cluster base), close the current cluster and start a new one whose base is
       // this packet's tick.
+      // A video keyframe starts a new Cluster too, so seeking lands on one.
+      let isCued = packet.stream == .video && packet.isKeyframe
       if let cluster {
         let outsideCluster =
           packet.tick >= cluster.timestampTicks
           ? packet.tick - cluster.timestampTicks > TimestampScale.maxForwardRelativeTick
           : cluster.timestampTicks - packet.tick > TimestampScale.maxBackwardRelativeTick
-        if outsideCluster { try closeCluster() }
+        if outsideCluster || isCued { try closeCluster() }
       }
       if cluster == nil {
         var body = EBML.Buffer()
         body.uint(ElementID.timestamp, packet.tick)
-        cluster = (packet.tick, body)
+        cluster = (packet.tick, body, isCued)
       }
       let base = cluster!.timestampTicks
       let relative =
@@ -385,6 +418,9 @@ extension MKV {
 
     private mutating func closeCluster() throws {
       guard let cluster else { return }
+      if cluster.isCued {
+        cues.append((cluster.timestampTicks, output.count - segmentStart))
+      }
       var element = EBML.Buffer()
       element.element(ElementID.cluster, cluster.body.data)
       try output.append(element.data)
@@ -464,6 +500,17 @@ private enum ElementID {
   static let cluster: [UInt8] = [0x1F, 0x43, 0xB6, 0x75]
   static let timestamp: [UInt8] = [0xE7]
   static let simpleBlock: [UInt8] = [0xA3]
+  static let seekHead: [UInt8] = [0x11, 0x4D, 0x9B, 0x74]
+  static let seek: [UInt8] = [0x4D, 0xBB]
+  static let seekID: [UInt8] = [0x53, 0xAB]
+  static let seekPosition: [UInt8] = [0x53, 0xAC]
+  static let cues: [UInt8] = [0x1C, 0x53, 0xBB, 0x6B]
+  static let cuePoint: [UInt8] = [0xBB]
+  static let cueTime: [UInt8] = [0xB3]
+  static let cueTrackPositions: [UInt8] = [0xB7]
+  static let cueTrack: [UInt8] = [0xF7]
+  static let cueClusterPosition: [UInt8] = [0xF1]
+  static let void: [UInt8] = [0xEC]
 }
 
 private enum EBML {
@@ -546,6 +593,46 @@ private enum EBML {
       body.string(ElementID.writingApp, Container.writerName)
       let bodyStart = element(ElementID.info, body.data)
       durationAt(bodyStart + durationInBody)
+    }
+
+    /// A SeekHead pointing at the Info, the Tracks and the Cues, by their positions in the
+    /// Segment. The Cues' position is 0 for now; `cues` is where its Seek starts in the buffer
+    /// and where its 8-byte position goes.
+    static func seekHead(info: Int, tracks: Int) -> (
+      buffer: Buffer, cues: (start: Int, positionAt: Int)
+    ) {
+      var body = Buffer()
+      body.seek(ElementID.info, at: info)
+      body.seek(ElementID.tracks, at: tracks)
+      let cuesStart = body.data.count
+      let cuesPosition = body.seek(ElementID.cues, at: 0)
+      var buffer = Buffer()
+      let bodyStart = buffer.element(ElementID.seekHead, body.data)
+      return (buffer, (bodyStart + cuesStart, bodyStart + cuesPosition))
+    }
+
+    /// A Seek with its position 8 bytes wide; returns where the position starts.
+    @discardableResult private mutating func seek(_ id: [UInt8], at position: Int) -> Int {
+      var body = Buffer()
+      body.element(ElementID.seekID, Data(id))
+      let positionInBody = body.element(
+        ElementID.seekPosition, EBML.fixedUnsigned(UInt64(position)))
+      return element(ElementID.seek, body.data) + positionInBody
+    }
+
+    /// Cues pointing at each Cluster that starts with a keyframe of `track`.
+    mutating func cues(_ cues: [(tick: UInt64, position: Int)], track: UInt64) {
+      master(ElementID.cues) { body in
+        for cue in cues {
+          body.master(ElementID.cuePoint) { point in
+            point.uint(ElementID.cueTime, cue.tick)
+            point.master(ElementID.cueTrackPositions) { positions in
+              positions.uint(ElementID.cueTrack, track)
+              positions.uint(ElementID.cueClusterPosition, UInt64(cue.position))
+            }
+          }
+        }
+      }
     }
 
     /// The Tracks: video as track 1, audio as track 2.
@@ -640,5 +727,15 @@ private enum EBML {
 
   static func float64(_ value: Double) -> Data {
     Buffer.float64(value)
+  }
+
+  /// An unsigned integer body 8 bytes wide, whatever its value, so it can be written over.
+  static func fixedUnsigned(_ value: UInt64) -> Data {
+    Data((0..<8).reversed().map { UInt8(truncatingIfNeeded: value >> (8 * $0)) })
+  }
+
+  /// A Void element of `size` bytes in all, which players skip; `size` is 2 to 128.
+  static func void(size: Int) -> Data {
+    Data(ElementID.void + [0x80 | UInt8(size - 2)] + [UInt8](repeating: 0, count: size - 2))
   }
 }

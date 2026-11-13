@@ -189,6 +189,130 @@ func realStreamsRoundTrip(aspect: MKV.Video.DisplayAspect) throws {
   }
 }
 
+/// 9.6 s of 25 fps video in groups of 12 pictures, each group's B-pictures after the pictures
+/// they come between, with 32 ms audio frames alongside.
+private func groupedStreams() -> (video: MKV.Video, audio: MKV.Audio) {
+  var order: [(frame: Int, isKeyframe: Bool)] = []
+  for group in stride(from: 0, to: 240, by: 12) {
+    order.append((group, true))
+    for anchor in stride(from: 3, to: 12, by: 3) {
+      order += [(group + anchor, false), (group + anchor - 2, false), (group + anchor - 1, false)]
+    }
+    order += [(group + 10, false), (group + 11, false)]
+  }
+  let video = order.map { frame, isKeyframe in
+    MKV.Packet(
+      bytes: Data([UInt8(frame % 256)]), presentation: .milliseconds(40 * frame),
+      duration: .milliseconds(40), isKeyframe: isKeyframe)
+  }
+  let audio = (0..<300).map { frame in
+    MKV.Packet(
+      bytes: Data([0]), presentation: .milliseconds(32 * frame), duration: .milliseconds(32),
+      isKeyframe: true)
+  }
+  return (
+    MKV.Video(width: 720, height: 576, displayAspect: .sixteenByNine, packets: video),
+    MKV.Audio(sampleRate: 48_000, channels: 2, packets: audio)
+  )
+}
+
+@Test func everyClusterStartsWithAVideoKeyframe() throws {
+  let (video, audio) = groupedStreams()
+
+  let clusters = try segment(MKV.data(video: video, audio: audio)).filter { $0.id == 0x1F43_B675 }
+
+  #expect(clusters.count == 20, "one Cluster per group of pictures")
+  for cluster in clusters {
+    let first = try #require(children(of: cluster.body).first { $0.id == 0xA3 })
+    #expect(first.body[0] == 0x81, "video track")
+    #expect(first.body[3] == 0x80, "keyframe")
+  }
+}
+
+@Test func cuesPointAtEachKeyframesCluster() throws {
+  let (video, audio) = groupedStreams()
+
+  let segment = try segment(MKV.data(video: video, audio: audio))
+
+  let cues = try #require(segment.first { $0.id == 0x1C53_BB6B })
+  let points = children(of: cues.body).filter { $0.id == 0xBB }
+  #expect(points.count == 20)
+  for (index, point) in points.enumerated() {
+    let fields = children(of: point.body)
+    let time = try #require(fields.first { $0.id == 0xB3 }).uint
+    #expect(time == UInt64(480 * index), "the group's keyframe time")
+    let positions = children(of: try #require(fields.first { $0.id == 0xB7 }).body)
+    #expect(try #require(positions.first { $0.id == 0xF7 }).uint == 1)
+    let position = try #require(positions.first { $0.id == 0xF1 }).uint
+    let cluster = try #require(segment.first { $0.start == Int(position) })
+    #expect(cluster.id == 0x1F43_B675)
+    let timestamp = try #require(children(of: cluster.body).first { $0.id == 0xE7 }).uint
+    #expect(timestamp == time)
+  }
+}
+
+@Test func seekHeadPointsAtInfoTracksAndCues() throws {
+  let (video, audio) = groupedStreams()
+
+  let segment = try segment(MKV.data(video: video, audio: audio))
+
+  #expect(segment.first?.id == 0x114D_9B74, "the SeekHead comes first")
+  let seeks = children(of: try #require(segment.first).body).filter { $0.id == 0x4DBB }
+  var targets: [UInt64] = []
+  for seek in seeks {
+    let fields = children(of: seek.body)
+    let id = try #require(fields.first { $0.id == 0x53AB }).uint
+    let position = try #require(fields.first { $0.id == 0x53AC }).uint
+    #expect(segment.first { $0.start == Int(position) }?.id == id)
+    targets.append(id)
+  }
+  #expect(targets == [0x1549_A966, 0x1654_AE6B, 0x1C53_BB6B], "Info, Tracks and Cues")
+}
+
+@Test func videoWithoutKeyframesHasNoCuesForTheSeekHeadToPointAt() throws {
+  let packet = MKV.Packet(
+    bytes: Data([0]), presentation: .zero, duration: .milliseconds(40), isKeyframe: false)
+
+  let segment = try segment(
+    MKV.data(
+      video: MKV.Video(width: 720, height: 480, displayAspect: .fourByThree, packets: [packet]),
+      audio: MKV.Audio(sampleRate: 48_000, channels: 2, packets: [packet])))
+
+  #expect(!segment.contains { $0.id == 0x1C53_BB6B })
+  let entries = children(of: try #require(segment.first { $0.id == 0x114D_9B74 }).body)
+  #expect(entries.map(\.id) == [0x4DBB, 0x4DBB, 0xEC], "Info, Tracks, then padding")
+}
+
+/// The elements directly inside an EBML body, each with where it starts in that body.
+private func children(of body: [UInt8]) -> [(id: UInt64, body: [UInt8], start: Int, uint: UInt64)] {
+  var result: [(id: UInt64, body: [UInt8], start: Int, uint: UInt64)] = []
+  var offset = 0
+  func vint(stripMarker: Bool) -> UInt64 {
+    let first = body[offset]
+    let width = first.leadingZeroBitCount + 1
+    var value = UInt64(stripMarker ? first & (0xFF >> width) : first)
+    for index in 1..<width { value = (value << 8) | UInt64(body[offset + index]) }
+    offset += width
+    return value
+  }
+  while offset < body.count {
+    let start = offset
+    let id = vint(stripMarker: false)
+    let size = Int(vint(stripMarker: true))
+    let element = Array(body[offset..<offset + size])
+    result.append((id, element, start, element.reduce(0) { ($0 << 8) | UInt64($1) }))
+    offset += size
+  }
+  return result
+}
+
+/// The elements directly inside an MKV's Segment.
+private func segment(_ data: Data) throws -> [(
+  id: UInt64, body: [UInt8], start: Int, uint: UInt64
+)] {
+  children(of: try #require(children(of: Array(data)).first { $0.id == 0x1853_8067 }).body)
+}
+
 private func elements(_ data: Data) -> [(id: UInt64, body: [UInt8], end: Int)] {
   let bytes = Array(data)
   var result: [(id: UInt64, body: [UInt8], end: Int)] = []
