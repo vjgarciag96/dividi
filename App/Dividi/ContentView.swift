@@ -35,7 +35,7 @@ struct ContentView: View {
         Button("Extract…", systemImage: "square.and.arrow.down") {
           if let selectedTitle { extract(selectedTitle) }
         }
-        .disabled(!(selectedTitle.map { $0.unsupportedReason == nil } ?? false) || isExtracting)
+        .disabled(!canExtract)
       }
       .safeAreaInset(edge: .bottom) { statusBar }
       .fileImporter(isPresented: $isPickingFolder, allowedContentTypes: [.folder]) { result in
@@ -93,6 +93,12 @@ struct ContentView: View {
 
   private var isExtracting: Bool {
     if case .running = extraction { true } else { false }
+  }
+
+  /// Whether a supported Title is selected and no other Extraction is running.
+  private var canExtract: Bool {
+    guard let selectedTitle, selectedTitle.unsupportedReason == nil else { return false }
+    return !isExtracting
   }
 
   private var selectedTitle: Title? {
