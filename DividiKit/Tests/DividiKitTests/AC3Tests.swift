@@ -86,6 +86,12 @@ private func frame(_ filler: UInt8) -> Data {
   #expect(frames.map(\.bytes) == [frame(2), frame(3)])
 }
 
+@Test func bytesAfterTheLastWholeFrameAreLeftUnfinished() throws {
+  let frames = try AC3.frames(in: [.ac3(frame(1) + frame(2).prefix(100), presentation: 0)])
+
+  #expect(frames.unfinished == frame(2).prefix(100))
+}
+
 @Test func streamWithoutFramesHasNoFormat() throws {
   let frames = try AC3.frames(in: [.ac3(Data([1, 2, 3]))])
 
@@ -110,7 +116,7 @@ func realAudioFramesMatchFFprobe(channels: Int) throws {
       packets += try ProgramStream.packets(inPack: data.subdata(in: start..<start + Sector.size))
     }
 
-    let (format, frames) = try AC3.frames(in: packets.filter { $0.stream == .ac3(0) })
+    let (format, frames, _) = try AC3.frames(in: packets.filter { $0.stream == .ac3(0) })
 
     #expect(format == AC3.Format(sampleRate: 48_000, channels: channels))
     let expected = try probe(vob, in: directory).packets.filter { $0.streamIndex == 2 }

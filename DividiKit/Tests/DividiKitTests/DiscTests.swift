@@ -33,7 +33,9 @@ import Testing
         duration: .milliseconds(90_480),
         chapters: [Chapter(start: .zero, duration: .milliseconds(90_480))],
         cells: [Cell(sectors: 0...999, duration: .milliseconds(90_480))],
-        audioTracks: [AudioTrack(codec: .ac3, channels: 6, language: "en", kind: .normal)],
+        audioTracks: [
+          AudioTrack(codec: .ac3, channels: 6, language: "en", kind: .normal, substream: 0)
+        ],
         subtitleTracks: [],
         unsupportedReason: nil)
     ])
@@ -104,9 +106,10 @@ import Testing
 
   #expect(
     title.audioTracks == [
-      AudioTrack(codec: .ac3, channels: 6, language: "en", kind: .normal),
-      AudioTrack(codec: .ac3, channels: 2, language: "en", kind: .directorsComments),
-      AudioTrack(codec: .lpcm, channels: 2, language: nil, kind: .unspecified),
+      AudioTrack(codec: .ac3, channels: 6, language: "en", kind: .normal, substream: 0),
+      AudioTrack(
+        codec: .ac3, channels: 2, language: "en", kind: .directorsComments, substream: 2),
+      AudioTrack(codec: .lpcm, channels: 2, language: nil, kind: .unspecified, substream: 3),
     ])
   #expect(
     title.subtitleTracks == [
@@ -169,6 +172,24 @@ import Testing
   let title = try #require(try Disc(reading: disc.source).titles.first)
 
   #expect(title.unsupportedReason == nil)
+}
+
+@Test func audioTrackKeepsTheSubstreamItsProgramChainNames() throws {
+  let disc = TestDisc(
+    titles: [TestTitle()],
+    titleSets: [
+      TestTitleSet(
+        audio: [TestAudio(language: "en"), TestAudio(language: "fr")],
+        chapters: [[(programChain: 1, program: 1)]],
+        programChains: [
+          TestProgramChain(cells: [TestCell()], audioStreams: [1], audioSubstreams: [1: 4])
+        ])
+    ])
+
+  let title = try #require(try Disc(reading: disc.source).titles.first)
+
+  #expect(title.audioTracks.map(\.language) == ["fr"])
+  #expect(title.audioTracks.map(\.substream) == [4])
 }
 
 @Test func titleSpanningProgramChainsPlaysThemInChapterOrder() throws {

@@ -137,6 +137,8 @@ struct TestProgramChain {
   var programs = [1]
   /// Audio stream numbers the chain uses, as indices into the Title Set's audio.
   var audioStreams: [Int] = []
+  /// The VOB sub-stream carrying each audio stream, when it isn't the stream's own number.
+  var audioSubstreams: [Int: Int] = [:]
   var subtitleStreams: [Int] = []
 
   fileprivate func bytes() -> Data {
@@ -150,7 +152,8 @@ struct TestProgramChain {
     chain.u8(cells.count, at: 3)  // Cell count
     chain.bytes(playbackTime.bcd, at: 4)  // playback time
     for stream in audioStreams {
-      chain.u8(0x80 | stream, at: 0x0C + 2 * stream)  // audio stream control: used | stream
+      let substream = audioSubstreams[stream] ?? stream
+      chain.u8(0x80 | substream, at: 0x0C + 2 * stream)  // audio stream control: used | substream
     }
     for stream in subtitleStreams {
       chain.u8(0x80 | stream, at: 0x1C + 4 * stream)  // subtitle stream control: used | stream

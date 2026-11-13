@@ -27,8 +27,12 @@ enum AC3 {
   /// Bytes that aren't a whole sync frame, such as the tail of a frame cut off at the start,
   /// are dropped, even when they hold a sync word. A frame whose sync word starts in a packet
   /// with a presentation time takes it; others follow on from the frame before, or count back
-  /// from the frame after. The format is `nil` when there are no frames.
-  static func frames(in packets: [PESPacket]) -> (format: Format?, frames: [CodedFrame]) {
+  /// from the frame after. The format is `nil` when there are no frames. The bytes after the
+  /// last whole frame are returned as `unfinished`, so a frame cut off where a Cell ends can be
+  /// finished by the next.
+  static func frames(in packets: [PESPacket]) -> (
+    format: Format?, frames: [CodedFrame], unfinished: Data
+  ) {
     let (stream, packetStarts) = joinedPayloads(of: packets)
 
     var format: Format?
@@ -67,7 +71,8 @@ enum AC3 {
         bytes: Data(frame.bytes), presentation: time, duration: frame.header.duration,
         isKeyframe: true)
     }
-    return (format, coded)
+    let unfinished = Data(stream[(frames.last?.bytes.endIndex ?? 0)...])
+    return (format, coded, unfinished)
   }
 
   private static let syncWord: [UInt8] = [0x0B, 0x77]
