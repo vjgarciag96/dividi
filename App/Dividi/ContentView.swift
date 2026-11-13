@@ -1,5 +1,7 @@
+import AppKit
 import DividiKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ContentView: View {
   private enum Phase {
@@ -9,9 +11,19 @@ struct ContentView: View {
     case failed(String)
   }
 
+  /// Where the Extraction of one Title stands.
+  private enum ExtractionState {
+    case idle
+    case running(title: Int)
+    case finished(title: Int, file: URL)
+    case failed(title: Int, reason: String)
+  }
+
   @State private var phase = Phase.empty
   @State private var isPickingFolder = false
   @State private var folder: URL?
+  @State private var selection: Title.ID?
+  @State private var extraction = ExtractionState.idle
 
   var body: some View {
     content
@@ -19,8 +31,13 @@ struct ContentView: View {
       .navigationSubtitle(folder?.lastPathComponent ?? "")
       .toolbar {
         Button("Open…", systemImage: "folder") { isPickingFolder = true }
-          .disabled(isReading)
+          .disabled(isReading || isExtracting)
+        Button("Extract…", systemImage: "square.and.arrow.down") {
+          if let selectedTitle { extract(selectedTitle) }
+        }
+        .disabled(!(selectedTitle.map { $0.unsupportedReason == nil } ?? false) || isExtracting)
       }
+      .safeAreaInset(edge: .bottom) { statusBar }
       .fileImporter(isPresented: $isPickingFolder, allowedContentTypes: [.folder]) { result in
         if case .success(let url) = result { read(url) }
       }
@@ -39,7 +56,7 @@ struct ContentView: View {
     case .reading:
       ProgressView("Reading Disc…")
     case .read(let titles):
-      TitleTable(titles: titles)
+      TitleTable(titles: titles, selection: $selection)
     case .failed(let message):
       ContentUnavailableView(
         "Couldn't Read Disc", systemImage: "exclamationmark.triangle",
@@ -47,12 +64,68 @@ struct ContentView: View {
     }
   }
 
+  @ViewBuilder private var statusBar: some View {
+    switch extraction {
+    case .idle:
+      EmptyView()
+    case .running(let title):
+      StatusBar {
+        ProgressView().controlSize(.small)
+        Text("Extracting Title \(title)…")
+      }
+    case .finished(let title, let file):
+      StatusBar {
+        Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+        Text("Extracted Title \(title) to \(file.lastPathComponent).")
+        Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([file]) }
+      }
+    case .failed(let title, let reason):
+      StatusBar {
+        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.yellow)
+        Text("Couldn't extract Title \(title): \(reason.hasSuffix(".") ? reason : reason + ".")")
+      }
+    }
+  }
+
   private var isReading: Bool {
     if case .reading = phase { true } else { false }
   }
 
+  private var isExtracting: Bool {
+    if case .running = extraction { true } else { false }
+  }
+
+  private var selectedTitle: Title? {
+    guard case .read(let titles) = phase else { return nil }
+    return titles.first { $0.id == selection }
+  }
+
+  private func extract(_ title: Title) {
+    guard let folder else { return }
+    let panel = NSSavePanel()
+    panel.allowedContentTypes = [UTType(filenameExtension: "mkv") ?? .movie]
+    panel.nameFieldStringValue = "Title \(title.number).mkv"
+    guard panel.runModal() == .OK, let destination = panel.url else { return }
+
+    extraction = .running(title: title.number)
+    Task {
+      let accessing = folder.startAccessingSecurityScopedResource()
+      defer { if accessing { folder.stopAccessingSecurityScopedResource() } }
+      do {
+        try await Task.detached {
+          try Extraction.extract(title, from: FolderSource(url: folder), to: destination)
+        }.value
+        extraction = .finished(title: title.number, file: destination)
+      } catch {
+        extraction = .failed(title: title.number, reason: error.localizedDescription)
+      }
+    }
+  }
+
   private func read(_ url: URL) {
     folder = url
+    selection = nil
+    extraction = .idle
     phase = .reading
     Task {
       let accessing = url.startAccessingSecurityScopedResource()
@@ -67,11 +140,25 @@ struct ContentView: View {
   }
 }
 
-private struct TitleTable: View {
-  let titles: [Title]
+/// A one-line bar along the bottom of the window.
+private struct StatusBar<Content: View>: View {
+  @ViewBuilder let content: Content
 
   var body: some View {
-    Table(titles) {
+    HStack(spacing: 8) { content }
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .padding(.horizontal, 12)
+      .padding(.vertical, 8)
+      .background(.bar)
+  }
+}
+
+private struct TitleTable: View {
+  let titles: [Title]
+  @Binding var selection: Title.ID?
+
+  var body: some View {
+    Table(titles, selection: $selection) {
       TableColumn("Title") { Text($0.number, format: .number) }
         .width(40)
       TableColumn("Duration") { Text($0.duration, format: .time(pattern: .hourMinuteSecond)) }

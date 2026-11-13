@@ -130,6 +130,22 @@ public enum DemuxError: Error, Equatable, Sendable {
   case unsupportedFrameRate
 }
 
+extension DemuxError: LocalizedError {
+  public var errorDescription: String? {
+    switch self {
+    case .unsupportedTitle(.multiAngle): "the Title uses multiple angles, which isn't supported"
+    case .unsupportedTitle(.seamlessBranching):
+      "the Title uses seamless branching, which isn't supported"
+    case .noAC3Track: "the Title has no AC-3 audio Track"
+    case .noAudioFrames: "the Title's AC-3 Track has no audio in it"
+    case .invalidPack: "a Sector of the Title isn't a valid MPEG-2 program stream pack"
+    case .missingSequenceHeader: "the Title's video has no sequence header"
+    case .unsupportedAspectRatio: "the Title's video is neither 4:3 nor 16:9"
+    case .unsupportedFrameRate: "the Title's video has an unknown frame rate"
+    }
+  }
+}
+
 /// One coded picture or audio frame cut out of an elementary stream, timed in 90 kHz ticks.
 struct CodedFrame: Equatable {
   let bytes: Data
