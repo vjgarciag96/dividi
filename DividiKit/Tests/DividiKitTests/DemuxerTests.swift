@@ -3,9 +3,12 @@ import Testing
 
 @testable import DividiKit
 
-/// One Cell's packs: a navigation pack, then a group of three pictures 40 ms apart and four
-/// 32 ms AC-3 frames, each in its own pack, all starting at `presentation`.
-private func cellPacks(presentation: Int, substream: Int = 0) -> Data {
+/// One Cell's packs: a navigation pack, then a group of three pictures 40 ms apart starting at
+/// `presentation`, and four 32 ms AC-3 frames starting at `audioPresentation`, each in its own
+/// pack.
+private func cellPacks(
+  presentation: Int, audioPresentation: Int? = nil, substream: Int = 0
+) -> Data {
   var packs = TestPack.navigation()
   for index in 0..<3 {
     var picture = TestMPEG2Video.picture(temporalReference: index, type: index == 0 ? 1 : 2)
@@ -20,11 +23,16 @@ private func cellPacks(presentation: Int, substream: Int = 0) -> Data {
     packs += TestPack.pack([
       TestPES(
         streamID: 0xBD, substream: UInt8(0x80 + substream),
-        presentation: presentation + 2_880 * index,
-        payload: TestAC3.frame(frameSizeCode: 16, size: 512, filler: UInt8(index)))
+        presentation: (audioPresentation ?? presentation) + 2_880 * index,
+        payload: audioFrame(index))
     ])
   }
   return packs
+}
+
+/// A 32 ms AC-3 frame filled with `number`.
+private func audioFrame(_ number: Int) -> Data {
+  TestAC3.frame(frameSizeCode: 16, size: 512, filler: UInt8(number))
 }
 
 /// The number of Sectors `cellPacks` takes.
@@ -74,21 +82,21 @@ private func demux(_ source: InMemorySource) throws -> (video: MKV.Video, audio:
   #expect(audio.packets.map(\.duration) == Array(repeating: .milliseconds(32), count: 4))
   #expect(
     audio.packets.map(\.bytes)
-      == (0..<4).map { TestAC3.frame(frameSizeCode: 16, size: 512, filler: UInt8($0)) })
+      == [audioFrame(0), audioFrame(1), audioFrame(2), audioFrame(3)])
 }
 
 @Test func cellsPlayInPlaybackOrderOneAfterAnother() throws {
-  // The second Cell on the Disc plays first. Each Cell lasts 128 ms, its last audio frame's end.
+  // The second Cell on the Disc plays first. Each Cell's pictures last 120 ms.
   let vob = cellPacks(presentation: 90_000) + cellPacks(presentation: 200_000)
   let source = disc(cells: [cellSectors...2 * cellSectors - 1, 0...cellSectors - 1], vob: vob)
 
   let (video, audio) = try demux(source)
 
   #expect(
-    video.packets.map(\.presentation) == [0, 40, 80, 128, 168, 208].map { .milliseconds($0) })
+    video.packets.map(\.presentation) == [0, 40, 80, 120, 160, 200].map { .milliseconds($0) })
   #expect(
     audio.packets.map(\.presentation)
-      == [0, 32, 64, 96, 128, 160, 192, 224].map { .milliseconds($0) })
+      == [0, 32, 64, 96, 120, 152, 184, 216].map { .milliseconds($0) })
 }
 
 @Test func timestampsStayContinuousWhenACellResetsThem() throws {
@@ -98,7 +106,89 @@ private func demux(_ source: InMemorySource) throws -> (video: MKV.Video, audio:
   let (video, _) = try demux(source)
 
   #expect(
-    video.packets.map(\.presentation) == [0, 40, 80, 128, 168, 208].map { .milliseconds($0) })
+    video.packets.map(\.presentation) == [0, 40, 80, 120, 160, 200].map { .milliseconds($0) })
+}
+
+@Test func cellsSharingAClockKeepItWhenTheirAudioRunsAheadOfTheirPictures() throws {
+  // Each Cell's audio runs 8 ms past its pictures, so the next Cell's audio starts 8 ms after
+  // its pictures do.
+  let vob =
+    cellPacks(presentation: 90_000)
+    + cellPacks(presentation: 90_000 + 10_800, audioPresentation: 90_000 + 11_520)
+  let source = disc(cells: [0...cellSectors - 1, cellSectors...2 * cellSectors - 1], vob: vob)
+
+  let (video, audio) = try demux(source)
+
+  #expect(
+    video.packets.map(\.presentation) == [0, 40, 80, 120, 160, 200].map { .milliseconds($0) })
+  #expect(
+    audio.packets.map(\.presentation)
+      == [0, 32, 64, 96, 128, 160, 192, 224].map { .milliseconds($0) })
+}
+
+@Test func audioFrameSplitAcrossTwoCellsIsKeptWhole() throws {
+  // Cell 1's last pack holds the start of audio frame 3; Cell 2's first audio pack the rest.
+  var first = TestPack.navigation()
+  var second = TestPack.navigation()
+  for index in 0..<3 {
+    let headers =
+      index == 0 ? TestMPEG2Video.sequenceHeader() + TestMPEG2Video.groupOfPictures() : Data()
+    first += TestPack.pack([
+      TestPES(
+        presentation: 90_000 + 3_600 * index,
+        payload: headers
+          + TestMPEG2Video.picture(temporalReference: index, type: index == 0 ? 1 : 2))
+    ])
+    second += TestPack.pack([
+      TestPES(
+        presentation: 100_800 + 3_600 * index,
+        payload: headers
+          + TestMPEG2Video.picture(temporalReference: index, type: index == 0 ? 1 : 2))
+    ])
+  }
+  for index in 0..<3 {
+    first += TestPack.pack([
+      TestPES(
+        streamID: 0xBD, substream: 0x80, presentation: 90_000 + 2_880 * index,
+        payload: audioFrame(index))
+    ])
+  }
+  first += TestPack.pack([
+    TestPES(
+      streamID: 0xBD, substream: 0x80, presentation: 98_640, payload: audioFrame(3).prefix(100))
+  ])
+  second += TestPack.pack([
+    TestPES(streamID: 0xBD, substream: 0x80, payload: audioFrame(3).dropFirst(100))
+  ])
+  for index in 4..<7 {
+    second += TestPack.pack([
+      TestPES(
+        streamID: 0xBD, substream: 0x80, presentation: 90_000 + 2_880 * index,
+        payload: audioFrame(index))
+    ])
+  }
+  let source = disc(cells: [0...7, 8...15], vob: first + second)
+
+  let (_, audio) = try demux(source)
+
+  #expect(
+    audio.packets.map(\.bytes) == [
+      audioFrame(0), audioFrame(1), audioFrame(2), audioFrame(3), audioFrame(4), audioFrame(5),
+      audioFrame(6),
+    ])
+  #expect(
+    audio.packets.map(\.presentation) == [0, 32, 64, 96, 128, 160, 192].map { .milliseconds($0) })
+}
+
+@Test func timestampsWrappingInsideACellRunOn() throws {
+  // 33-bit timestamps wrap to 0 after 8_589_934_591 ticks, a picture and a half in.
+  let source = disc(
+    cells: [0...cellSectors - 1], vob: cellPacks(presentation: 8_589_934_592 - 5_400))
+
+  let (video, audio) = try demux(source)
+
+  #expect(video.packets.map(\.presentation) == [0, 40, 80].map { .milliseconds($0) })
+  #expect(audio.packets.map(\.presentation) == [0, 32, 64, 96].map { .milliseconds($0) })
 }
 
 @Test func audioComesFromTheFirstAC3TracksSubstream() throws {
