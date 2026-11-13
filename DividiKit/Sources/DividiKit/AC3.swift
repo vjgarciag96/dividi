@@ -25,9 +25,9 @@ enum AC3 {
   /// Joins the packets' payloads and cuts them into frames.
   ///
   /// Bytes that aren't a whole sync frame, such as the tail of a frame cut off at the start,
-  /// are dropped. A frame whose sync word starts in a packet with a presentation time takes it;
-  /// others follow on from the frame before, or count back from the frame after. The format is
-  /// `nil` when there are no frames.
+  /// are dropped, even when they hold a sync word. A frame whose sync word starts in a packet
+  /// with a presentation time takes it; others follow on from the frame before, or count back
+  /// from the frame after. The format is `nil` when there are no frames.
   static func frames(in packets: [PESPacket]) -> (format: Format?, frames: [CodedFrame]) {
     let (stream, packetStarts) = joinedPayloads(of: packets)
 
@@ -35,7 +35,12 @@ enum AC3 {
     var frames: [(bytes: ArraySlice<UInt8>, header: Header)] = []
     var offset = 0
     while offset + 7 <= stream.count {
-      guard let header = Header(stream, at: offset), offset + header.size <= stream.count else {
+      // A sync word can turn up inside other bytes, so a frame only counts when another sync
+      // frame, or the end of the stream, follows it.
+      guard let header = Header(stream, at: offset), offset + header.size <= stream.count,
+        stream[(offset + header.size)...].starts(
+          with: syncWord.prefix(stream.count - offset - header.size))
+      else {
         offset += 1
         continue
       }
@@ -64,6 +69,8 @@ enum AC3 {
     }
     return (format, coded)
   }
+
+  private static let syncWord: [UInt8] = [0x0B, 0x77]
 
   private struct Header {
     let sampleRate: Int

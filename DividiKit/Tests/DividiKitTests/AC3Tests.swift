@@ -77,6 +77,15 @@ private func frame(_ filler: UInt8) -> Data {
   #expect(frames.map(\.bytes) == [frame(2)])
 }
 
+@Test func syncWordInsideACutOffFrameIsNotTakenForAFrame() throws {
+  // The tail of a frame whose bytes happen to read as a 512-byte sync frame's header.
+  let tail = TestAC3.frame(frameSizeCode: 16, size: 512).prefix(40)
+
+  let frames = try AC3.frames(in: [.ac3(tail + frame(2) + frame(3), presentation: 0)]).frames
+
+  #expect(frames.map(\.bytes) == [frame(2), frame(3)])
+}
+
 @Test func streamWithoutFramesHasNoFormat() throws {
   let frames = try AC3.frames(in: [.ac3(Data([1, 2, 3]))])
 
