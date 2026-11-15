@@ -18,8 +18,10 @@ enum TestMPEG2Video {
     return Data(bytes)
   }
 
-  static func groupOfPictures() -> Data {
-    Data([0x00, 0x00, 0x01, 0xB8, 0x00, 0x08, 0x00, 0x00])
+  /// A closed group's pictures predict only from each other; a broken link says the group before
+  /// it isn't the one it was encoded after.
+  static func groupOfPictures(closed: Bool = false, brokenLink: Bool = false) -> Data {
+    Data([0x00, 0x00, 0x01, 0xB8, 0x00, 0x08, 0x00, (closed ? 0x40 : 0) | (brokenLink ? 0x20 : 0)])
   }
 
   struct Coding {
