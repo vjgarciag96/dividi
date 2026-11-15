@@ -183,9 +183,11 @@ func realStreamsRoundTrip(aspect: MKV.Video.DisplayAspect) throws {
     #expect(segment.end == data.count, "the Segment runs to the end of the file")
     let duration = try #require(all.first { $0.id == 0x4489 })
     #expect(Double(bitPattern: duration.body.reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }) == 128)
-    let blocks = all.filter { $0.id == 0xA3 }.map { $0.body[4] }
+    let blocks = all.filter { $0.id == 0xA3 }
+    #expect(blocks.map { $0.body[4] } == [0, 0, 32, 40, 64, 80, 96], "blocks interleave by time")
     #expect(
-      blocks == [0, 0, 32, 40, 64, 80, 96], "blocks interleave by time, video first on a tie")
+      blocks.map { $0.body[0] } == [0x81, 0x82, 0x82, 0x81, 0x82, 0x81, 0x82],
+      "video first on a tie")
   }
 }
 
@@ -336,4 +338,21 @@ private func elements(_ data: Data) -> [(id: UInt64, body: [UInt8], end: Int)] {
     offset += size
   }
   return result
+}
+
+@Test func writerQueueLetsGoOfPacketsItHasWritten() {
+  final class Tracked {}
+  var queue = Queue<Tracked>()
+  weak var written: Tracked?
+  do {
+    let packet = Tracked()
+    written = packet
+    queue.push(packet)
+  }
+  // The other track's packet stays queued, as when one track runs ahead of the other.
+  queue.push(Tracked())
+
+  _ = queue.pop()
+
+  #expect(written == nil)
 }
