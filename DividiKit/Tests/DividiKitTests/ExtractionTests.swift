@@ -108,7 +108,8 @@ private func contents(of directory: URL) throws -> Set<String> {
     try Data("old".utf8).write(to: output)
     let before = try contents(of: directory)
 
-    #expect(throws: FolderSource.ReadError.fileNotFound("VTS_01_2.VOB")) {
+    #expect(throws: DemuxError.pastEndOfTitleSet(titleSet: 1, sector: vob.count / 2 / Sector.size))
+    {
       try Extraction.extract(try firstTitle(of: source), from: source, to: output)
     }
     #expect(try Data(contentsOf: output) == Data("old".utf8))

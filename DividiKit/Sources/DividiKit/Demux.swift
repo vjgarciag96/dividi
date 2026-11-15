@@ -245,6 +245,9 @@ public enum DemuxError: Error, Equatable, Sendable {
   case unsupportedAspectRatio
   /// The video's frame rate code isn't one MPEG-2 defines.
   case unsupportedFrameRate
+  /// A Cell runs past the end of its Title Set's last VOB, at this Sector of the Title Set:
+  /// the IFO is broken or the copy is truncated.
+  case pastEndOfTitleSet(titleSet: Int, sector: Int)
 }
 
 extension DemuxError: LocalizedError {
@@ -259,6 +262,9 @@ extension DemuxError: LocalizedError {
     case .missingSequenceHeader: "the Title's video has no sequence header"
     case .unsupportedAspectRatio: "the Title's video is neither 4:3 nor 16:9"
     case .unsupportedFrameRate: "the Title's video has an unknown frame rate"
+    case .pastEndOfTitleSet(let titleSet, let sector):
+      "the Title runs past the end of Title Set \(titleSet)'s VOB files, at Sector \(sector); "
+        + "the copy may be incomplete"
     }
   }
 }
