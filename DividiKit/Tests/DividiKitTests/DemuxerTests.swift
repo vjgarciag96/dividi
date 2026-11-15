@@ -257,3 +257,106 @@ private func demux(_ source: InMemorySource) throws -> (video: MKV.Video, audio:
         == decodedHashes(output, map: "0:v:0", in: directory))
   }
 }
+
+/// One Cell of `groups` groups of three pictures 40 ms apart, with continuous 32 ms AC-3 frames
+/// packed 1,000 bytes at a time, so frames run across packs and across groups.
+private func groupsVOB(_ groups: Int) -> Data {
+  let frameCount = groups * 120 / 32
+  let audio = (0..<frameCount).map { audioFrame($0 % 256) }.reduce(Data(), +)
+  let chunks = stride(from: 0, to: audio.count, by: 1_000).map {
+    $0..<min($0 + 1_000, audio.count)
+  }
+  var vob = Data()
+  for group in 0..<groups {
+    vob += TestPack.navigation()
+    for index in 0..<3 {
+      var picture = TestMPEG2Video.picture(temporalReference: index, type: index == 0 ? 1 : 2)
+      if index == 0 {
+        picture = TestMPEG2Video.sequenceHeader() + TestMPEG2Video.groupOfPictures() + picture
+      }
+      vob += TestPack.pack([
+        TestPES(presentation: 90_000 + 10_800 * group + 3_600 * index, payload: picture)
+      ])
+    }
+    for chunk in chunks where chunk.lowerBound * groups / audio.count == group {
+      // A packet is stamped with the first frame starting in it.
+      let frame = (chunk.lowerBound + 511) / 512
+      vob += TestPack.pack([
+        TestPES(
+          streamID: 0xBD, substream: 0x80,
+          presentation: frame * 512 < chunk.upperBound ? 90_000 + 2_880 * frame : nil,
+          payload: audio[chunk])
+      ])
+    }
+  }
+  return vob
+}
+
+/// Collects what the demuxer hands over, and how much of the Title had been read by then.
+private struct Recorder: PacketSink {
+  let read: () -> Double
+  var packets: [(stream: MKVError.Stream, packet: MKV.Packet, read: Double)] = []
+
+  mutating func append(_ packet: MKV.Packet, to stream: MKVError.Stream) {
+    packets.append((stream, packet, read()))
+  }
+}
+
+private final class Progress {
+  var values: [Double] = []
+}
+
+private func record(
+  _ source: InMemorySource, minimumPieceBytes: Int = 1
+) throws -> (recorder: Recorder, progress: [Double]) {
+  let title = try #require(try Disc(reading: source).titles.first)
+  let progress = Progress()
+  let recorder = try Demuxer.demux(
+    title, from: source, minimumPieceBytes: minimumPieceBytes,
+    progress: { progress.values.append($0) },
+    into: { _, _ in Recorder(read: { progress.values.last ?? 0 }) })
+  return (recorder, progress.values)
+}
+
+@Test func longCellIsHandedOverWhileItIsStillBeingRead() throws {
+  let vob = groupsVOB(100)
+  let source = disc(cells: [0...vob.count / Sector.size - 1], vob: vob)
+
+  let (recorder, _) = try record(source)
+
+  #expect(vob.count / Sector.size > 512, "the Cell takes more than one read")
+  #expect(try #require(recorder.packets.first).read < 1)
+}
+
+@Test func cellCutIntoPiecesDemuxesAsAWhole() throws {
+  let vob = groupsVOB(100)
+  let source = disc(cells: [0...vob.count / Sector.size - 1], vob: vob)
+
+  let pieces = try record(source, minimumPieceBytes: 1).recorder.packets
+  let whole = try record(source, minimumPieceBytes: .max).recorder.packets
+
+  func track(_ stream: MKVError.Stream, of packets: [(MKVError.Stream, MKV.Packet, Double)])
+    -> [MKV.Packet]
+  {
+    packets.filter { $0.0 == stream }.map(\.1)
+  }
+  #expect(pieces.first { $0.read < 1 } != nil, "the Cell was cut into pieces")
+  #expect(track(.video, of: pieces) == track(.video, of: whole))
+  #expect(track(.audio, of: pieces) == track(.audio, of: whole))
+  let video = track(.video, of: pieces)
+  let audio = track(.audio, of: pieces)
+  #expect(video.map(\.presentation) == (0..<300).map { .milliseconds(40 * $0) })
+  #expect(audio.map(\.presentation) == (0..<375).map { .milliseconds(32 * $0) })
+  #expect(audio.map(\.bytes) == (0..<375).map { audioFrame($0 % 256) })
+}
+
+@Test func progressRisesToTheWholeTitle() throws {
+  let vob = groupsVOB(100)
+  let source = disc(cells: [0...vob.count / Sector.size - 1], vob: vob)
+
+  let progress = try record(source).progress
+
+  #expect(progress.count == 2)
+  #expect(progress == progress.sorted())
+  #expect(progress.last == 1)
+}

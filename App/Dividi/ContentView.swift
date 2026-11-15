@@ -14,7 +14,8 @@ struct ContentView: View {
   /// Where the Extraction of one Title stands.
   private enum ExtractionState {
     case idle
-    case running(title: Int)
+    /// `read` is the fraction of the Title read so far.
+    case running(title: Int, read: Double)
     case finished(title: Int, file: URL)
     case failed(title: Int, reason: String)
   }
@@ -68,10 +69,11 @@ struct ContentView: View {
     switch extraction {
     case .idle:
       EmptyView()
-    case .running(let title):
+    case .running(let title, let read):
       StatusBar {
-        ProgressView().controlSize(.small)
-        Text("Extracting Title \(title)…")
+        ProgressView(value: read).frame(maxWidth: 200)
+        Text("Extracting Title \(title)… \(read, format: .percent.precision(.fractionLength(0)))")
+          .monospacedDigit()
       }
     case .finished(let title, let file):
       StatusBar {
@@ -113,13 +115,24 @@ struct ContentView: View {
     panel.nameFieldStringValue = "Title \(title.number).mkv"
     guard panel.runModal() == .OK, let destination = panel.url else { return }
 
-    extraction = .running(title: title.number)
+    extraction = .running(title: title.number, read: 0)
+    let show: @MainActor (Double) -> Void = { read in
+      // A late report mustn't cover up the Extraction finishing.
+      guard case .running(title.number, _) = extraction else { return }
+      extraction = .running(title: title.number, read: read)
+    }
     Task {
       let accessing = folder.startAccessingSecurityScopedResource()
       defer { if accessing { folder.stopAccessingSecurityScopedResource() } }
       do {
         try await Task.detached {
-          try Extraction.extract(title, from: FolderSource(url: folder), to: destination)
+          var shownPercent = -1
+          try Extraction.extract(title, from: FolderSource(url: folder), to: destination) { read in
+            // At most once per whole percent, so the status bar isn't redrawn for every read.
+            guard Int(read * 100) != shownPercent else { return }
+            shownPercent = Int(read * 100)
+            Task { @MainActor in show(read) }
+          }
         }.value
         extraction = .finished(title: title.number, file: destination)
       } catch {

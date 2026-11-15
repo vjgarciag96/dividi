@@ -28,6 +28,12 @@ public struct FolderSource: SectorSource {
   }
 
   public func readSectors(_ sectors: ClosedRange<Int>, of file: String) throws -> Data {
+    // FileHandle hands back autoreleased objects. An Extraction reads a whole Title in one go
+    // off the main thread, where nothing drains them, so drain them here.
+    try autoreleasepool { try read(sectors, of: file) }
+  }
+
+  private func read(_ sectors: ClosedRange<Int>, of file: String) throws -> Data {
     let handle = try FileHandle(forReadingFrom: try url(of: file))
     defer { try? handle.close() }
     try handle.seek(toOffset: UInt64(sectors.lowerBound * Sector.size))

@@ -58,6 +58,21 @@ private func contents(of directory: URL) throws -> Set<String> {
   }
 }
 
+@Test func extractionReportsProgressUpToTheWholeTitle() throws {
+  try withTemporaryDirectory { directory in
+    let source = disc(vob: try realVOB(in: directory))
+    var progress: [Double] = []
+
+    try Extraction.extract(
+      try firstTitle(of: source), from: source, to: directory.appendingPathComponent("Title 1.mkv")
+    ) { progress.append($0) }
+
+    #expect(!progress.isEmpty)
+    #expect(progress == progress.sorted())
+    #expect(progress.last == 1)
+  }
+}
+
 @Test func extractionReplacesAnExistingFile() throws {
   try withTemporaryDirectory { directory in
     let source = disc(vob: try realVOB(in: directory))

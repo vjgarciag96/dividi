@@ -153,9 +153,47 @@ func realStreamsRoundTrip(aspect: MKV.Video.DisplayAspect) throws {
   }
 }
 
-private func elements(_ data: Data) -> [(id: UInt64, body: [UInt8])] {
+@Test func fileWriterPatchesTheSegmentSizeAndDurationWhenFinished() throws {
+  try withTemporaryDirectory { directory in
+    let url = directory.appendingPathComponent("output.mkv")
+    #expect(FileManager.default.createFile(atPath: url.path, contents: nil))
+    let handle = try FileHandle(forWritingTo: url)
+    var writer = try MKV.Writer(
+      output: FileOutput(handle, file: url),
+      video: MKV.VideoFormat(width: 720, height: 576, displayAspect: .sixteenByNine),
+      audio: MKV.AudioFormat(sampleRate: 48_000, channels: 2))
+    for time in [0, 40, 80] {
+      try writer.append(
+        MKV.Packet(
+          bytes: Data([UInt8(time)]), presentation: .milliseconds(time),
+          duration: .milliseconds(40), isKeyframe: time == 0), to: .video)
+    }
+    for time in [0, 32, 64, 96] {
+      try writer.append(
+        MKV.Packet(
+          bytes: Data([UInt8(time)]), presentation: .milliseconds(time),
+          duration: .milliseconds(32), isKeyframe: true), to: .audio)
+    }
+    try writer.finish()
+    try handle.close()
+
+    let data = try Data(contentsOf: url)
+    let all = elements(data)
+    let segment = try #require(all.first { $0.id == 0x1853_8067 })
+    #expect(segment.end == data.count, "the Segment runs to the end of the file")
+    let duration = try #require(all.first { $0.id == 0x4489 })
+    #expect(Double(bitPattern: duration.body.reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }) == 128)
+    let blocks = all.filter { $0.id == 0xA3 }
+    #expect(blocks.map { $0.body[4] } == [0, 0, 32, 40, 64, 80, 96], "blocks interleave by time")
+    #expect(
+      blocks.map { $0.body[0] } == [0x81, 0x82, 0x82, 0x81, 0x82, 0x81, 0x82],
+      "video first on a tie")
+  }
+}
+
+private func elements(_ data: Data) -> [(id: UInt64, body: [UInt8], end: Int)] {
   let bytes = Array(data)
-  var result: [(id: UInt64, body: [UInt8])] = []
+  var result: [(id: UInt64, body: [UInt8], end: Int)] = []
   var offset = 0
   func vint(stripMarker: Bool) -> UInt64 {
     let first = bytes[offset]
@@ -168,12 +206,29 @@ private func elements(_ data: Data) -> [(id: UInt64, body: [UInt8])] {
   while offset < bytes.count {
     let id = vint(stripMarker: false)
     let size = Int(vint(stripMarker: true))
-    let body = Array(bytes[offset..<offset + size])
-    result.append((id, body))
+    let body = Array(bytes[offset..<min(offset + size, bytes.count)])
+    result.append((id, body, offset + size))
     if [UInt64(0x1853_8067), 0x1549_A966, 0x1F43_B675].contains(id) {
       result.append(contentsOf: elements(Data(body)))
     }
     offset += size
   }
   return result
+}
+
+@Test func writerQueueLetsGoOfPacketsItHasWritten() {
+  final class Tracked {}
+  var queue = Queue<Tracked>()
+  weak var written: Tracked?
+  do {
+    let packet = Tracked()
+    written = packet
+    queue.push(packet)
+  }
+  // The other track's packet stays queued, as when one track runs ahead of the other.
+  queue.push(Tracked())
+
+  _ = queue.pop()
+
+  #expect(written == nil)
 }
