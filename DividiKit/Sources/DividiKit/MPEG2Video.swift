@@ -29,23 +29,82 @@ enum MPEG2Video {
     format: Format, frames: [CodedFrame]
   ) {
     let (stream, packetStarts) = joinedPayloads(of: packets)
+    guard let (sequenceStart, format, rate) = try firstSequence(in: stream) else {
+      throw .missingSequenceHeader
+    }
 
-    var sequence: (format: Format, rate: FrameRate)?
-    var isProgressive = false
-    var cuts: [Cut] = []
-    var group = 0
-    var inSecondField = false
+    var cutter = FrameCutter()
+    for header in headers(in: stream, from: sequenceStart) {
+      cutter.take(header)
+    }
+    let cuts = cutter.cuts
+
+    // Headers left after the last picture belong to no frame.
+    let ends = cuts.dropFirst().map(\.start) + [cutter.leadingStart ?? stream.count]
+    let pictures = zip(cuts, ends).map { cut, end in
+      (bytes: stream[cut.start..<end], picture: cut.picture)
+    }
+    let presentations = presentationTimes(
+      of: pictures.map(\.picture), packetStarts: packetStarts, rate: rate)
+    let frames = zip(pictures, presentations).map { picture, presentation in
+      CodedFrame(
+        bytes: Data(picture.bytes), presentation: presentation,
+        duration: rate.ticks(fields: picture.picture.fields), isKeyframe: picture.picture.isIntra)
+    }
+    return (format, frames)
+  }
+
+  /// The headers that shape frames, from one start code.
+  private enum Header {
+    /// A sequence or group of pictures header: either starts the next frame.
+    case leading(isGroup: Bool)
+    case picture(temporalReference: Int, isIntra: Bool)
+    /// A picture coding extension: whether its picture is one field, and how many fields it
+    /// is shown for.
+    case pictureCoding(isFieldPicture: Bool, fields: Int)
+  }
+
+  /// The first sequence header: where it starts, and what it says. Nothing before it can be
+  /// decoded.
+  private static func firstSequence(in stream: [UInt8]) throws(DemuxError) -> (
+    start: Int, format: Format, rate: FrameRate
+  )? {
     var offset = 0
     while let start = nextStartCode(in: stream, from: offset), start + 8 <= stream.count {
-      offset = start + 3
-      let id = stream[start + 3]
-      guard id == 0xB3 || id == 0xB5 || id == 0xB8 || id == 0x00 else { continue }
-      if id == 0xB3, sequence == nil {
-        sequence = try sequenceHeader(stream, at: start)
+      if stream[start + 3] == 0xB3 {
+        let (format, rate) = try sequenceHeader(stream, at: start)
+        return (start, format, rate)
       }
-      guard sequence != nil else { continue }
+      offset = start + 3
+    }
+    return nil
+  }
 
-      if id == 0xB5 {
+  /// The frame-shaping headers from `offset` on, with where each starts in the stream.
+  private static func headers(in stream: [UInt8], from offset: Int) -> [(start: Int, Header)] {
+    var headers: [(start: Int, Header)] = []
+    var isProgressive = false
+    var offset = offset
+    while let start = nextStartCode(in: stream, from: offset), start + 8 <= stream.count {
+      offset = start + 3
+      switch stream[start + 3] {
+      case 0xB3:
+        headers.append((start, .leading(isGroup: false)))
+      case 0xB8:
+        headers.append((start, .leading(isGroup: true)))
+      case 0x00:
+        // Picture header, from the start code:
+        //
+        //   0x04  10 bits   temporal reference
+        //         3 bits    coding type: 1 I, 2 P, 3 B
+        headers.append(
+          (
+            start,
+            .picture(
+              temporalReference: Int(stream[start + 4]) << 2 | Int(stream[start + 5] >> 6),
+              isIntra: stream[start + 5] >> 3 & 0x07 == 1)
+          ))
+      case 0xB5:
         // Extension, from the start code:
         //
         //   0x04  4 bits    extension id: 1 sequence, 8 picture coding
@@ -62,66 +121,83 @@ enum MPEG2Video {
         switch stream[start + 4] >> 4 {
         case 1:
           isProgressive = stream[start + 5] & 0x08 != 0
-        case 8 where cuts.last?.picture != nil:
+        case 8:
           let isFieldPicture = stream[start + 6] & 0x03 != 3
           let fields = shownFields(
             isProgressive: isProgressive, isFieldPicture: isFieldPicture,
             topFieldFirst: stream[start + 7] & 0x80 != 0,
             repeatFirstField: stream[start + 7] & 0x02 != 0)
-          if inSecondField {
-            cuts[cuts.count - 1].picture?.fields += fields
-          } else {
-            cuts[cuts.count - 1].picture?.fields = fields
-            cuts[cuts.count - 1].picture?.awaitsSecondField = isFieldPicture
-          }
+          headers.append((start, .pictureCoding(isFieldPicture: isFieldPicture, fields: fields)))
         default:
           break
         }
-        continue
+      default:
+        break
       }
+    }
+    return headers
+  }
 
-      // The second field picture of a frame follows the first straight away.
-      if id == 0x00, cuts.last?.picture?.awaitsSecondField == true {
-        cuts[cuts.count - 1].picture?.awaitsSecondField = false
-        inSecondField = true
-        continue
-      }
-      inSecondField = false
-      if cuts.isEmpty || cuts.last?.picture != nil {
-        cuts.append(Cut(start: start))
-      }
-      if id == 0xB8 { group += 1 }
-      if id == 0x00 {
-        // Picture header, from the start code:
-        //
-        //   0x04  10 bits   temporal reference
-        //         3 bits    coding type: 1 I, 2 P, 3 B
-        cuts[cuts.count - 1].picture = Picture(
-          offset: start,
-          temporalReference: Int(stream[start + 4]) << 2 | Int(stream[start + 5] >> 6),
-          isIntra: stream[start + 5] >> 3 & 0x07 == 1,
-          group: group)
-      }
-    }
-    guard let (format, rate) = sequence else { throw .missingSequenceHeader }
+  /// Groups headers into frames: a frame is the sequence and group headers before it, then a
+  /// frame picture or a pair of field pictures.
+  private struct FrameCutter {
+    private(set) var cuts: [Cut] = []
+    /// Where the sequence and group headers waiting for the next picture start.
+    private(set) var leadingStart: Int?
+    private var group = 0
 
-    let ends = cuts.dropFirst().map(\.start) + [stream.count]
-    let pictures = zip(cuts, ends).compactMap { cut, end in
-      cut.picture.map { (bytes: stream[cut.start..<end], picture: $0) }
+    mutating func take(_ header: (start: Int, Header)) {
+      let (start, header) = header
+      switch header {
+      case .leading(let isGroup):
+        leadingStart = leadingStart ?? start
+        if isGroup { group += 1 }
+      case .picture(let temporalReference, let isIntra):
+        // The second field picture of a frame follows the first straight away.
+        if leadingStart == nil, cuts.last?.stage == .awaitingSecondField {
+          cuts[cuts.count - 1].stage = .secondField
+          return
+        }
+        cuts.append(
+          Cut(
+            start: leadingStart ?? start,
+            picture: Picture(
+              offset: start, temporalReference: temporalReference, isIntra: isIntra,
+              group: group)))
+        leadingStart = nil
+      case .pictureCoding(let isFieldPicture, let fields):
+        guard leadingStart == nil, let stage = cuts.last?.stage else { return }
+        switch stage {
+        case .firstField:
+          cuts[cuts.count - 1].picture.fields = fields
+          cuts[cuts.count - 1].stage = isFieldPicture ? .awaitingSecondField : .whole
+        case .secondField:
+          cuts[cuts.count - 1].picture.fields += fields
+          cuts[cuts.count - 1].stage = .whole
+        case .awaitingSecondField, .whole:
+          break
+        }
+      }
     }
-    let presentations = presentationTimes(
-      of: pictures.map(\.picture), packetStarts: packetStarts, rate: rate)
-    let frames = zip(pictures, presentations).map { picture, presentation in
-      CodedFrame(
-        bytes: Data(picture.bytes), presentation: presentation,
-        duration: rate.ticks(fields: picture.picture.fields), isKeyframe: picture.picture.isIntra)
-    }
-    return (format, frames)
   }
 
   private struct Cut {
-    var start: Int
-    var picture: Picture?
+    /// Where the frame's first header starts in the joined payloads.
+    let start: Int
+    var picture: Picture
+    var stage = Stage.firstField
+
+    /// How far through its pictures a frame is.
+    enum Stage {
+      /// Its first picture's coding extension is still to come.
+      case firstField
+      /// Its first picture is a field: the next picture is the other one.
+      case awaitingSecondField
+      /// Its second field's coding extension is still to come.
+      case secondField
+      /// Nothing more belongs to it.
+      case whole
+    }
   }
 
   private struct Picture {
@@ -131,7 +207,6 @@ enum MPEG2Video {
     let isIntra: Bool
     let group: Int
     var fields = 2
-    var awaitsSecondField = false
   }
 
   private struct FrameRate {
