@@ -99,6 +99,45 @@ private typealias ES = TestMPEG2Video
   #expect(frames.map(\.isKeyframe) == [true, false])
 }
 
+@Test func aFieldFollowedByAGroupHeaderIsAFrameOfItsOwn() throws {
+  let headers = ES.sequenceHeader(progressive: false) + ES.groupOfPictures()
+  let top = ES.picture(temporalReference: 0, type: 1, coding: ES.Coding(structure: 1))
+  let next = ES.groupOfPictures() + ES.picture(temporalReference: 0, type: 1, coding: ES.Coding())
+
+  let frames = try MPEG2Video.frames(in: [
+    .video(headers + top, presentation: 90_000), .video(next),
+  ])
+  .frames
+
+  #expect(frames.map(\.bytes) == [headers + top, next])
+}
+
+@Test func codingExtensionWithoutAPictureBeforeItIsIgnored() throws {
+  // Without a coding extension of its own, the picture is a frame shown for 2 fields.
+  let i =
+    ES.sequenceHeader(progressive: false) + ES.groupOfPictures()
+    + ES.picture(temporalReference: 0, type: 1)
+  // A frame picture's coding extension, shown for 3 fields, straight after a group header.
+  let stray = Data([0x00, 0x00, 0x01, 0xB5, 0x8F, 0xFF, 0xF3, 0x83, 0x80])
+  let p = ES.picture(temporalReference: 0, type: 1, coding: ES.Coding())
+
+  let frames = try MPEG2Video.frames(in: [
+    .video(i, presentation: 90_000), .video(ES.groupOfPictures() + stray + p),
+  ]).frames
+
+  #expect(frames.map(\.duration) == [3_600, 3_600])
+}
+
+@Test func headersAfterTheLastPictureBelongToNoFrame() throws {
+  let i = ES.sequenceHeader() + ES.picture(temporalReference: 0, type: 1)
+
+  let frames = try MPEG2Video.frames(in: [
+    .video(i, presentation: 90_000), .video(ES.sequenceHeader() + ES.groupOfPictures()),
+  ]).frames
+
+  #expect(frames.map(\.bytes) == [i])
+}
+
 @Test func progressiveFramesRepeatWholeFrames() throws {
   let frames = try MPEG2Video.frames(in: [
     .video(
@@ -210,13 +249,13 @@ private typealias ES = TestMPEG2Video
 
     #expect(format == MPEG2Video.Format(width: 720, height: 576, displayAspect: .sixteenByNine))
     let expected = try probe(vob, in: directory).packets.filter { $0.streamIndex == 1 }
-    #expect(frames.count == expected.count)
-    for (frame, packet) in zip(frames, expected) {
-      #expect(frame.bytes == (try packet.payload()))
-      #expect(frame.presentation == Int((packet.time * 90_000).rounded()))
-      #expect(frame.isKeyframe == packet.flags.contains("K"))
-      #expect(frame.duration == 3_600)
+    let probed = try expected.map { packet in
+      CodedFrame(
+        bytes: try packet.payload(), presentation: Int((packet.time * 90_000).rounded()),
+        duration: 3_600, isKeyframe: packet.flags.contains("K"))
     }
+    let difference = firstDifference(frames, probed)
+    #expect(difference == nil, "\(difference ?? "")")
   }
 }
 
@@ -258,14 +297,31 @@ private typealias ES = TestMPEG2Video
       45_045, 49_550, 52_553, 57_057, 60_060, 64_565, 67_568, 72_072, 75_075, 79_580, 82_583,
       87_087,
     ]
+    let lateStart = firstDifference(starts, exactStarts) { abs($0 - $1) <= 1 }
     #expect(
-      starts.count == exactStarts.count
-        && zip(starts, exactStarts).allSatisfy { abs($0 - $1) <= 1 },
-      "each frame should start once the fields of the frames shown before it are over: \(starts)")
+      lateStart == nil,
+      "each frame should start once the frames shown before it are over: \(lateStart ?? "")")
+    let wrongLength = firstDifference(
+      shown.map(\.duration), Array(repeating: [4_505, 3_003], count: 12).flatMap(\.self))
     #expect(
-      shown.map(\.duration) == [
-        4_505, 3_003, 4_505, 3_003, 4_505, 3_003, 4_505, 3_003, 4_505, 3_003, 4_505, 3_003,
-        4_505, 3_003, 4_505, 3_003, 4_505, 3_003, 4_505, 3_003, 4_505, 3_003, 4_505, 3_003,
-      ], "frames should alternate between 3 and 2 fields")
+      wrongLength == nil, "frames should alternate between 3 and 2 fields: \(wrongLength ?? "")")
   }
+}
+
+/// Where two runs of frames, in the same order, first part: which frame differs and how, or
+/// how many frames each has.
+private func firstDifference<Frame>(
+  _ actual: [Frame], _ expected: [Frame], by matches: (Frame, Frame) -> Bool
+) -> String? {
+  if let index = zip(actual, expected).enumerated().first(where: { !matches($1.0, $1.1) })?.offset {
+    return "frame \(index) is \(actual[index]), expected \(expected[index])"
+  }
+  guard actual.count == expected.count else {
+    return "\(actual.count) frames, expected \(expected.count)"
+  }
+  return nil
+}
+
+private func firstDifference<Frame: Equatable>(_ actual: [Frame], _ expected: [Frame]) -> String? {
+  firstDifference(actual, expected, by: ==)
 }
