@@ -21,7 +21,10 @@ struct TitleSetVOBs {
     var fileStart = 0
     var fileNumber = 1
     while fileStart <= sectors.upperBound {
-      let fileEnd = try end(ofFile: fileNumber, startingAt: fileStart)
+      guard let fileEnd = try end(ofFile: fileNumber, startingAt: fileStart) else {
+        throw DemuxError.pastEndOfTitleSet(
+          titleSet: titleSet, sector: max(sectors.lowerBound, fileStart))
+      }
       let first = max(sectors.lowerBound, fileStart)
       let last = min(sectors.upperBound, fileEnd - 1)
       if first <= last {
@@ -34,10 +37,17 @@ struct TitleSetVOBs {
     return data
   }
 
-  /// Where the 1-based VOB file ends in the run, given where it starts.
-  private mutating func end(ofFile number: Int, startingAt start: Int) throws -> Int {
+  /// Where the 1-based VOB file ends in the run, given where it starts, or `nil` when the Title
+  /// Set has no such file because its last VOB came before.
+  private mutating func end(ofFile number: Int, startingAt start: Int) throws -> Int? {
     if number <= fileEnds.count { return fileEnds[number - 1] }
-    let end = start + (try source.sectorCount(of: name(ofFile: number)))
+    let sectorCount: Int
+    do {
+      sectorCount = try source.sectorCount(of: name(ofFile: number))
+    } catch FolderSource.ReadError.fileNotFound(_) where number > 1 {
+      return nil
+    }
+    let end = start + sectorCount
     fileEnds.append(end)
     return end
   }

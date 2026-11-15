@@ -84,11 +84,27 @@ private let source = InMemorySource(files: [
   #expect(data == numberedSectors(1..<3))
 }
 
-@Test func readingPastTheLastVOBFails() {
+@Test func readingPastTheLastVOBFailsAtTheFirstSectorPastIt() {
   var vobs = TitleSetVOBs(titleSet: 1, source: source)
 
-  #expect(throws: FolderSource.ReadError.fileNotFound("VTS_01_3.VOB")) {
-    try vobs.readSectors(4...5)
+  #expect(throws: DemuxError.pastEndOfTitleSet(titleSet: 1, sector: 5)) {
+    try vobs.readSectors(4...6)
+  }
+}
+
+@Test func readingWhollyPastTheLastVOBFailsAtTheFirstSectorAsked() {
+  var vobs = TitleSetVOBs(titleSet: 1, source: source)
+
+  #expect(throws: DemuxError.pastEndOfTitleSet(titleSet: 1, sector: 7)) {
+    try vobs.readSectors(7...8)
+  }
+}
+
+@Test func aMissingFirstVOBIsAMissingFile() {
+  var vobs = TitleSetVOBs(titleSet: 3, source: source)
+
+  #expect(throws: FolderSource.ReadError.fileNotFound("VTS_03_1.VOB")) {
+    try vobs.readSectors(0...0)
   }
 }
 
