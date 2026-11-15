@@ -408,7 +408,7 @@ extension MKV {
 }
 
 /// A first-in, first-out queue that pops without moving what's behind.
-private struct Queue<Element> {
+struct Queue<Element> {
   private var elements: [Element] = []
   private var head = 0
 
@@ -419,14 +419,14 @@ private struct Queue<Element> {
   }
 
   mutating func pop() -> Element {
-    defer {
-      head += 1
-      if head == elements.count {
-        elements.removeAll(keepingCapacity: true)
-        head = 0
-      }
+    let element = elements[head]
+    head += 1
+    // Let go of popped elements once they're half the array, so moving the rest stays cheap.
+    if head * 2 >= elements.count {
+      elements.removeFirst(head)
+      head = 0
     }
-    return elements[head]
+    return element
   }
 }
 

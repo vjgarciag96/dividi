@@ -215,3 +215,20 @@ private func elements(_ data: Data) -> [(id: UInt64, body: [UInt8], end: Int)] {
   }
   return result
 }
+
+@Test func writerQueueLetsGoOfPacketsItHasWritten() {
+  final class Tracked {}
+  var queue = Queue<Tracked>()
+  weak var written: Tracked?
+  do {
+    let packet = Tracked()
+    written = packet
+    queue.push(packet)
+  }
+  // The other track's packet stays queued, as when one track runs ahead of the other.
+  queue.push(Tracked())
+
+  _ = queue.pop()
+
+  #expect(written == nil)
+}
