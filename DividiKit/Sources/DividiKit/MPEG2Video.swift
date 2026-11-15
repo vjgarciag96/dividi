@@ -25,7 +25,11 @@ enum MPEG2Video {
   /// headers before it, the same split MKV and ffmpeg use. Anything before the first sequence
   /// header is dropped, since it can't be decoded. A frame whose header starts in a stamped
   /// packet takes its stamp; others count from the stamped frames in the same group.
-  static func frames(in packets: [PESPacket]) throws(DemuxError) -> (
+  ///
+  /// The B-pictures an open group shows before its first I-picture predict from the group
+  /// before. They are dropped where that group was never decoded: in the first group when the
+  /// packets follow a jump, and in any group whose broken link flag is set.
+  static func frames(in packets: [PESPacket], afterAJump: Bool = false) throws(DemuxError) -> (
     format: Format, frames: [CodedFrame]
   ) {
     let (stream, packetStarts) = joinedPayloads(of: packets)
@@ -46,7 +50,11 @@ enum MPEG2Video {
     }
     let presentations = presentationTimes(
       of: pictures.map(\.picture), packetStarts: packetStarts, rate: rate)
-    let frames = zip(pictures, presentations).map { picture, presentation in
+    let undecodable = undecodablePictures(
+      pictures.map(\.picture), groups: cutter.groups, afterAJump: afterAJump)
+    let frames = zip(pictures, presentations).enumerated().filter {
+      !undecodable.contains($0.offset)
+    }.map(\.element).map { picture, presentation in
       CodedFrame(
         bytes: Data(picture.bytes), presentation: presentation,
         duration: rate.ticks(fields: picture.picture.fields), isKeyframe: picture.picture.isIntra)
@@ -56,8 +64,8 @@ enum MPEG2Video {
 
   /// The headers that shape frames, from one start code.
   private enum Header {
-    /// A sequence or group of pictures header: either starts the next frame.
-    case leading(isGroup: Bool)
+    /// A sequence header or a group of pictures header: either starts the next frame.
+    case leading(Group?)
     case picture(temporalReference: Int, isIntra: Bool)
     /// A picture coding extension: whether its picture is one field, and how many fields it
     /// is shown for.
@@ -89,9 +97,16 @@ enum MPEG2Video {
       offset = start + 3
       switch stream[start + 3] {
       case 0xB3:
-        headers.append((start, .leading(isGroup: false)))
+        headers.append((start, .leading(nil)))
       case 0xB8:
-        headers.append((start, .leading(isGroup: true)))
+        // Group of pictures header, from the start code:
+        //
+        //   0x04  25 bits   time code
+        //   0x07  bit 6     closed group: no picture predicts from the group before
+        //         bit 5     broken link: the group before isn't the one it was encoded after
+        let flags = stream[start + 7]
+        headers.append(
+          (start, .leading(Group(isClosed: flags & 0x40 != 0, hasBrokenLink: flags & 0x20 != 0))))
       case 0x00:
         // Picture header, from the start code:
         //
@@ -144,14 +159,19 @@ enum MPEG2Video {
     private(set) var cuts: [Cut] = []
     /// Where the sequence and group headers waiting for the next picture start.
     private(set) var leadingStart: Int?
+    /// The groups so far, numbered from 1; pictures before the first group header are in 0.
+    private(set) var groups: [Int: Group] = [:]
     private var group = 0
 
     mutating func take(_ header: (start: Int, Header)) {
       let (start, header) = header
       switch header {
-      case .leading(let isGroup):
+      case .leading(let header):
         leadingStart = leadingStart ?? start
-        if isGroup { group += 1 }
+        if let header {
+          group += 1
+          groups[group] = header
+        }
       case .picture(let temporalReference, let isIntra):
         // The second field picture of a frame follows the first straight away.
         if leadingStart == nil, cuts.last?.stage == .awaitingSecondField {
@@ -207,6 +227,34 @@ enum MPEG2Video {
     let isIntra: Bool
     let group: Int
     var fields = 2
+  }
+
+  private struct Group {
+    let isClosed: Bool
+    let hasBrokenLink: Bool
+  }
+
+  /// Which pictures, by index, predict from a group that was never decoded: the B-pictures an
+  /// open group shows before its first I-picture, in the first group after a jump or in a group
+  /// with a broken link. A group's first picture is its first I-picture, so they are the ones
+  /// shown before it.
+  private static func undecodablePictures(
+    _ pictures: [Picture], groups: [Int: Group], afterAJump: Bool
+  ) -> Set<Int> {
+    var firstShown: [Int: Int] = [:]
+    for picture in pictures where firstShown[picture.group] == nil {
+      firstShown[picture.group] = picture.temporalReference
+    }
+    let firstGroup = pictures.first?.group
+    return Set(
+      pictures.indices.filter { index in
+        let picture = pictures[index]
+        guard picture.temporalReference < firstShown[picture.group]!,
+          groups[picture.group]?.isClosed != true
+        else { return false }
+        return (afterAJump && picture.group == firstGroup)
+          || groups[picture.group]?.hasBrokenLink == true
+      })
   }
 
   private struct FrameRate {

@@ -14,8 +14,9 @@ public enum Demuxer {
   /// Timestamps start at zero and run on across Cells, even where the Disc's own jump, reset or
   /// wrap: each Cell's pictures start where the previous Cell's ended, and its audio keeps its
   /// place against them. An audio frame cut off where a Cell ends is finished by the next Cell
-  /// when that Cell follows it on the Disc. Navigation, subtitles and other audio Tracks are
-  /// left out.
+  /// when that Cell follows it on the Disc. Where a Cell doesn't follow the one before it on the
+  /// Disc, or is the first, the pictures its first group can't decode without the group before
+  /// it on the Disc are left out. Navigation, subtitles and other audio Tracks are left out.
   public static func streams(of title: Title, from source: some SectorSource) throws -> (
     video: MKV.Video, audio: MKV.Audio
   ) {
@@ -97,14 +98,13 @@ public enum Demuxer {
 
     var cellStart = 0
     var audioEnd = Int.min
-    var unfinishedAudio: (after: Cell, bytes: Data)?
+    var previousCell: Cell?
+    var unfinishedAudio = Data()
     for cell in title.cells {
-      var carriedAudio = Data()
-      if let unfinishedAudio,
-        unfinishedAudio.after.sectors.upperBound + 1 == cell.sectors.lowerBound
-      {
-        carriedAudio = unfinishedAudio.bytes
-      }
+      defer { previousCell = cell }
+      let followsOn = previousCell?.sectors.upperBound == cell.sectors.lowerBound - 1
+      var carriedAudio = followsOn ? unfinishedAudio : Data()
+      var isFirstPiece = true
       // The Cell's own clock, read against its first frame so a wrap inside it runs on. Its
       // pictures, or its audio when it has none, place it on the Title's timeline.
       var clock: (reference: Int, first: Int, byVideo: Bool)?
@@ -118,7 +118,9 @@ public enum Demuxer {
               stream: .ac3(track.substream), presentation: nil, decoding: nil,
               payload: carriedAudio), at: 0)
         }
-        let video = try MPEG2Video.frames(in: packets.filter { $0.stream == .video })
+        let video = try MPEG2Video.frames(
+          in: packets.filter { $0.stream == .video }, afterAJump: isFirstPiece && !followsOn)
+        isFirstPiece = false
         let audio = AC3.frames(in: audioPackets)
         carriedAudio = audio.unfinished
         videoFormat = videoFormat ?? video.format
@@ -146,7 +148,7 @@ public enum Demuxer {
           audioEnd = presentation + frame.duration
         }
       }
-      unfinishedAudio = (cell, carriedAudio)
+      unfinishedAudio = carriedAudio
       if let clock { cellStart += end - clock.first }
     }
 

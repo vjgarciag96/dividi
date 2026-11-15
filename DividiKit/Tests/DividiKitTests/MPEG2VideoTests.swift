@@ -206,6 +206,61 @@ private typealias ES = TestMPEG2Video
   #expect(frames.map(\.isKeyframe) == [true, false, true, false])
 }
 
+/// An open group shown as B0 B1 I2 B3 B4 P5, in decode order I2 B0 B1 P5 B3 B4, 40 ms a picture,
+/// each in its own packet with its presentation time.
+private func openGroup(
+  at presentation: Int, closed: Bool = false, brokenLink: Bool = false
+) -> [PESPacket] {
+  let pictures = [(2, 1), (0, 3), (1, 3), (5, 2), (3, 3), (4, 3)]
+  return pictures.enumerated().map { index, picture in
+    var bytes = ES.picture(
+      temporalReference: picture.0, type: picture.1, filler: UInt8(presentation / 90_000 + index))
+    if index == 0 {
+      bytes =
+        ES.sequenceHeader() + ES.groupOfPictures(closed: closed, brokenLink: brokenLink) + bytes
+    }
+    return .video(bytes, presentation: presentation + 3_600 * picture.0)
+  }
+}
+
+@Test func openGroupKeepsItsLeadingPicturesWhenNothingJumps() throws {
+  let frames = try MPEG2Video.frames(in: openGroup(at: 90_000)).frames
+
+  #expect(frames.map(\.presentation) == [97_200, 90_000, 93_600, 108_000, 100_800, 104_400])
+}
+
+@Test func openGroupAfterAJumpLosesThePicturesShownBeforeItsIPicture() throws {
+  let packets = openGroup(at: 90_000)
+
+  let frames = try MPEG2Video.frames(in: packets, afterAJump: true).frames
+
+  #expect(frames.map(\.bytes) == [0, 3, 4, 5].map { packets[$0].payload })
+  #expect(frames.map(\.presentation) == [97_200, 108_000, 100_800, 104_400])
+}
+
+@Test func closedGroupAfterAJumpKeepsItsLeadingPictures() throws {
+  let frames = try MPEG2Video.frames(in: openGroup(at: 90_000, closed: true), afterAJump: true)
+    .frames
+
+  #expect(frames.count == 6)
+}
+
+@Test func onlyTheFirstGroupAfterAJumpLosesPictures() throws {
+  let frames = try MPEG2Video.frames(
+    in: openGroup(at: 90_000) + openGroup(at: 111_600), afterAJump: true
+  ).frames
+
+  #expect(frames.count == 4 + 6)
+}
+
+@Test func groupWithABrokenLinkLosesItsLeadingPicturesWithoutAJump() throws {
+  let frames = try MPEG2Video.frames(
+    in: openGroup(at: 90_000) + openGroup(at: 111_600, brokenLink: true)
+  ).frames
+
+  #expect(frames.count == 6 + 4)
+}
+
 @Test func dataBeforeTheFirstSequenceHeaderIsDropped() throws {
   let i = ES.sequenceHeader() + ES.picture(temporalReference: 0, type: 1)
 

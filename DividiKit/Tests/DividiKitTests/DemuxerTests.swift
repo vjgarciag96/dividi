@@ -99,6 +99,41 @@ private func demux(_ source: InMemorySource) throws -> (video: MKV.Video, audio:
       == [0, 32, 64, 96, 120, 152, 184, 216].map { .milliseconds($0) })
 }
 
+@Test func cellsLoseTheirOpenGroupsLeadingPicturesOnlyWhereTheyDontFollowOn() throws {
+  // Each Cell is one open group shown as B0 B1 I2, in decode order I2 B0 B1, 40 ms a picture.
+  func openCell(_ number: Int) -> Data {
+    var packs = TestPack.navigation()
+    for (index, temporalReference) in [2, 0, 1].enumerated() {
+      var picture = TestMPEG2Video.picture(
+        temporalReference: temporalReference, type: index == 0 ? 1 : 3, filler: UInt8(number))
+      if index == 0 {
+        picture = TestMPEG2Video.sequenceHeader() + TestMPEG2Video.groupOfPictures() + picture
+      }
+      packs += TestPack.pack([
+        TestPES(streamID: 0xE0, presentation: 90_000 + 3_600 * temporalReference, payload: picture)
+      ])
+    }
+    for index in 0..<4 {
+      packs += TestPack.pack([
+        TestPES(
+          streamID: 0xBD, substream: 0x80, presentation: 97_200 + 2_880 * index,
+          payload: audioFrame(index))
+      ])
+    }
+    return packs
+  }
+  let (a, b, c) = (
+    0...cellSectors - 1, cellSectors...2 * cellSectors - 1, 2 * cellSectors...3 * cellSectors - 1
+  )
+  // B plays first, C follows it on the Disc, and A doesn't follow C.
+  let source = disc(cells: [b, c, a], vob: openCell(0) + openCell(1) + openCell(2))
+
+  let (video, _) = try demux(source)
+
+  #expect(video.packets.map(\.presentation) == [0, 120, 40, 80, 160].map { .milliseconds($0) })
+  #expect(video.packets.map(\.isKeyframe) == [true, true, false, false, true])
+}
+
 @Test func timestampsStayContinuousWhenACellResetsThem() throws {
   let vob = cellPacks(presentation: 500_000) + cellPacks(presentation: 0)
   let source = disc(cells: [0...cellSectors - 1, cellSectors...2 * cellSectors - 1], vob: vob)
@@ -178,6 +213,16 @@ private func demux(_ source: InMemorySource) throws -> (video: MKV.Video, audio:
     ])
   #expect(
     audio.packets.map(\.presentation) == [0, 32, 64, 96, 128, 160, 192].map { .milliseconds($0) })
+
+  // With another Cell between them on the Disc, Cell 2 no longer follows Cell 1, so the halves
+  // are never joined, even though here they would fit.
+  let jumping = disc(
+    cells: [0...7, 16...23], vob: first + cellPacks(presentation: 200_000) + second)
+
+  #expect(
+    try demux(jumping).audio.packets.map(\.bytes) == [
+      audioFrame(0), audioFrame(1), audioFrame(2), audioFrame(4), audioFrame(5), audioFrame(6),
+    ])
 }
 
 @Test func timestampsWrappingInsideACellRunOn() throws {
@@ -255,6 +300,55 @@ private func demux(_ source: InMemorySource) throws -> (video: MKV.Video, audio:
     #expect(
       try decodedHashes(source, map: "0:v:0", in: directory)
         == decodedHashes(output, map: "0:v:0", in: directory))
+  }
+}
+
+@Test func realOpenGroupsAfterAJumpLeaveOutOnlyThePicturesTheyCantDecode() throws {
+  try withTemporaryDirectory { directory in
+    // ffmpeg leaves groups of pictures open: each group's first B-pictures predict from the
+    // last picture of the group before.
+    let source = directory.appendingPathComponent("source.mkv")
+    let vob = directory.appendingPathComponent("VTS_01_1.VOB")
+    let output = directory.appendingPathComponent("output.mkv")
+    try run(
+      "ffmpeg",
+      [
+        "-f", "lavfi", "-i", "testsrc2=size=720x576:rate=25",
+        "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "2",
+        "-c:v", "mpeg2video", "-bf", "2", "-g", "12", "-sc_threshold", "1000000000",
+        "-aspect", "16:9", "-b:v", "6M", "-maxrate", "9M", "-bufsize", "1835k",
+        "-c:a", "ac3", "-ac", "2", source.path,
+      ], in: directory)
+    try run("ffmpeg", ["-i", source.path, "-c", "copy", "-f", "dvd", vob.path], in: directory)
+    let data = try Data(contentsOf: vob)
+    let sectors = data.count / Sector.size
+    // Where a group of pictures starts a Sector, as at the start of each video object unit.
+    let groupStarts = try (0..<sectors).filter { sector in
+      let pack = data.subdata(in: sector * Sector.size..<(sector + 1) * Sector.size)
+      return try ProgramStream.packets(inPack: pack).first { $0.stream == .video }.map {
+        $0.presentation != nil && $0.payload.starts(with: [0x00, 0x00, 0x01, 0xB3])
+      } ?? false
+    }
+    // 50 pictures in groups of 12, each starting a video object unit.
+    try #require(groupStarts.count == 5)
+
+    // The third group is skipped, so the fourth group's open start follows a picture it wasn't
+    // encoded against.
+    let streams = try demux(
+      disc(cells: [0...groupStarts[2] - 1, groupStarts[3]...sectors - 1], vob: data))
+    try MKV.data(video: streams.video, audio: streams.audio).write(to: output)
+
+    let original = try decodedHashes(source, map: "0:v:0", in: directory)
+    let result = try decodedHashes(output, map: "0:v:0", in: directory)
+    #expect(result.count == streams.video.packets.count, "every picture kept should decode")
+    let unseen = result.filter { !original.contains($0) }
+    #expect(unseen.isEmpty, "\(unseen.count) pictures decode to something the source never shows")
+    // In display order, the skipped group's 12 pictures and the 2 B-pictures before the fourth
+    // group's first picture are missing, and nothing else.
+    let kept = zip(result, original).prefix { $0 == $1 }.count
+    let isOriginalWithAGap = result.prefix(kept) + original.suffix(result.count - kept) == result
+    #expect(isOriginalWithAGap, "the pictures kept should be the source's, in its order")
+    #expect(original.count - result.count == 12 + 2)
   }
 }
 
